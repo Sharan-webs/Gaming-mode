@@ -18,6 +18,7 @@ class Agent(private val ctx: Context, private val hooks: Hooks) {
         fun overlays(visible: Boolean)
         fun macroSaved(name: String) {}
         fun addButton(label: String, script: String) {}
+        fun addMenu(title: String, items: String) {}
     }
 
     private val ui = Handler(Looper.getMainLooper())

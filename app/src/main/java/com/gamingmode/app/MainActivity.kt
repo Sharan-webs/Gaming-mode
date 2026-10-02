@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import rikka.shizuku.Shizuku
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -41,6 +42,9 @@ class MainActivity : Activity() {
     private lateinit var sheetStartBtn: Button
     private lateinit var showIconBtn: Button
     private var notifAsked = false
+    private val shizukuListener = Shizuku.OnRequestPermissionResultListener { _, result ->
+        if (result == PackageManager.PERMISSION_GRANTED) runOnUiThread { shizukuEnable() }
+    }
 
     private fun dp(v: Int) = UI.dp(this, v)
 
@@ -97,11 +101,11 @@ class MainActivity : Activity() {
                 }
             ),
             Perm(
-                "Master access (advanced, optional)",
-                "Lets the AI change secure/global phone settings and turns the accessibility service on by itself. One-time setup from Termux.",
+                "Master access (Shizuku, optional)",
+                "Install and start the Shizuku app, then tap Enable and allow it. The app then gives itself every permission and unlocks DPI changing, the console, taps that work while you touch, and system / game file access.",
                 false,
-                { Master.has(this) },
-                { showMasterDialog() }
+                { Shell.ready() },
+                { shizukuEnable() }
             ),
             Perm(
                 "Modify system settings (optional)",
@@ -125,6 +129,11 @@ class MainActivity : Activity() {
                 { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }
             )
         )
+
+        try {
+            Shizuku.addRequestPermissionResultListener(shizukuListener)
+        } catch (e: Throwable) {
+        }
 
         val rootFrame = FrameLayout(this)
         rootFrame.setBackgroundColor(0xFF0E1018.toInt())
@@ -199,6 +208,39 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         refresh()
+    }
+
+    override fun onDestroy() {
+        try {
+            Shizuku.removeRequestPermissionResultListener(shizukuListener)
+        } catch (e: Throwable) {
+        }
+        super.onDestroy()
+    }
+
+    private fun shizukuEnable() {
+        try {
+            if (!Shizuku.pingBinder()) {
+                Toast.makeText(this, "Shizuku is not running. Start it in the Shizuku app (Wireless debugging), then come back.", Toast.LENGTH_LONG).show()
+                val li = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                if (li != null) startActivity(li)
+                else startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")))
+                return
+            }
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                Shizuku.requestPermission(77)
+                return
+            }
+            Thread {
+                val r = Shell.grantSelf(this)
+                runOnUiThread {
+                    Toast.makeText(this, r.take(300), Toast.LENGTH_LONG).show()
+                    refresh()
+                }
+            }.start()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Shizuku error: " + e.message, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun reconnectAccessibility() {

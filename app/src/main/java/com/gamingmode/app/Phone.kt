@@ -295,6 +295,11 @@ class ScriptRunner(private val ctx: Context) {
                 val p = raw.split(Regex("\\s+"), 4)
                 PhoneCtl.setSetting(ctx, p.getOrNull(1) ?: "", p.getOrNull(2) ?: "", p.getOrNull(3) ?: "")
             }
+            "shell" -> Shell.run(raw.substringAfter(' ', ""))
+            "dpi" -> {
+                val v = t.getOrNull(1) ?: "reset"
+                if (v == "reset" || v.all { it.isDigit() }) Shell.run("wm density $v")
+            }
             "brightness" -> PhoneCtl.brightness(ctx, num(1).toInt())
             "volume" -> PhoneCtl.volume(ctx, num(1).toInt())
         }

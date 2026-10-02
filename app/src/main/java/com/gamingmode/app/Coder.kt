@@ -41,9 +41,9 @@ file text
 >>>
 ACTION: done
 TEXT: summary
-Actions: search (QUERY) | fetch (URL) | read, list (ROOT, PATH) | write (ROOT, PATH, CONTENT) | screen (visible text + tap coordinates) | tap (X, Y) | swipe (X1, Y1, X2, Y2) | type (TEXT) | key (KEY: back|home|recents|notifications|quick|power|lock) | open (NAME: app name or package) | setting (NS: system|secure|global, KEY, VALUE) | getsetting (NS, KEY) | wait (SECONDS) | js (CONTENT: sandboxed JavaScript, console.log or last expression is the result) | button (LABEL, CONTENT: script) | done (TEXT).
-button creates a floating on-screen button that runs a script. Script lines: tap X Y | hold X Y MS | swipe X1 Y1 X2 Y2 [MS] | wait MS | key NAME | type TEXT | open NAME | setting NS KEY VALUE | brightness 0-255 | volume 0-100 | repeat N ... end | forever ... end. Coordinates are screen pixels (use screen to find them). Never write Android source files to make a button: use button.
-ROOT: internal, shared (GamingModeAI folder), sdcard (SD GamingModeAI folder), phone (all phone storage), sdroot (whole SD card). Android blocks Android/data and Android/obb. Files outside your own folders get a .bak backup before being overwritten.
+Actions: search (QUERY) | fetch (URL) | read, list (ROOT, PATH) | write (ROOT, PATH, CONTENT) | screen (visible text + tap coordinates) | tap (X, Y) | swipe (X1, Y1, X2, Y2) | type (TEXT) | key (KEY: back|home|recents|notifications|quick|power|lock) | open (NAME: app name or package) | setting (NS: system|secure|global, KEY, VALUE) | getsetting (NS, KEY) | wait (SECONDS) | js (CONTENT: sandboxed JavaScript, console.log or last expression is the result) | button (LABEL, CONTENT: script) | shell (CMD, or a CONTENT block for several lines: full shell via Shizuku; use it for system files, game folders in Android/data, DPI with wm density) | menu (LABEL, CONTENT: lines like  Label :: command ; command) | done (TEXT).
+button creates a floating on-screen button that runs a script. Script lines: tap X Y | hold X Y MS | swipe X1 Y1 X2 Y2 [MS] | wait MS | key NAME | type TEXT | open NAME | setting NS KEY VALUE | brightness 0-255 | volume 0-100 | shell CMD | dpi N or reset | repeat N ... end | forever ... end. Coordinates are screen pixels (use screen to find them). Never write Android source files to make a button: use button.
+ROOT: internal, shared (GamingModeAI folder), sdcard (SD GamingModeAI folder), phone (all phone storage), sdroot (whole SD card). ROOT shell uses absolute paths through Shizuku and reaches everything, including Android/data. Files outside your own folders get a .bak backup before being overwritten.
 If screen shows nothing, the app is probably a game: tell the user to switch screenshot detection ON. Keep replies short.
 """.trimIndent()
 
@@ -201,10 +201,34 @@ If screen shows nothing, the app is probably a game: tell the user to switch scr
         return strip(httpGet(url, 300000)).take(6000)
     }
 
+    private fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
+
+    private fun shellFile(action: String, path: String, content: String?): String {
+        if (!path.startsWith("/")) return "ERROR: with ROOT shell the PATH must be absolute (start with /)"
+        return when (action) {
+            "read" -> Shell.run("cat ${q(path)}").take(6000)
+            "list" -> Shell.run("ls -la ${q(path)}").take(6000)
+            else -> {
+                if (content == null) return "ERROR: missing CONTENT block with <<< and >>>"
+                val dir = File(Environment.getExternalStorageDirectory(), "GamingModeAI")
+                dir.mkdirs()
+                val tmp = File(dir, ".xfer")
+                tmp.writeText(content)
+                val parent = path.substringBeforeLast('/', "/")
+                Shell.run(
+                    "mkdir -p ${q(parent)} && { [ -f ${q(path)} ] && [ ! -f ${q(path + ".bak")} ] && cp ${q(path)} ${q(path + ".bak")}; cp ${q(tmp.absolutePath)} ${q(path)}; }"
+                )
+            }
+        }
+    }
+
     private fun exec(cmd: Cmd): Out {
         val f = cmd.fields
         val root = (f["ROOT"] ?: "internal").lowercase()
         val path = f["PATH"] ?: ""
+        if (root == "shell" && (cmd.action == "read" || cmd.action == "write" || cmd.action == "list")) {
+            return Out(shellFile(cmd.action, path, cmd.content))
+        }
         return try {
             when (cmd.action) {
                 "search" -> {
@@ -326,6 +350,22 @@ If screen shows nothing, the app is probably a game: tell the user to switch scr
                     Out(PhoneCtl.setSetting(ctx, f["NS"] ?: "", f["KEY"] ?: "", f["VALUE"] ?: ""))
                 }
                 "getsetting" -> Out(PhoneCtl.getSetting(ctx, f["NS"] ?: "", f["KEY"] ?: ""))
+                "shell" -> {
+                    val c = cmd.content ?: f["CMD"] ?: ""
+                    hooks.status("# " + c.lines().firstOrNull().orEmpty().take(60))
+                    Out(Shell.run(c))
+                }
+                "menu" -> {
+                    val title = (f["LABEL"] ?: f["TITLE"] ?: "Menu").trim().ifEmpty { "Menu" }
+                    val body = cmd.content ?: ""
+                    if (!body.contains("::")) {
+                        Out("ERROR: CONTENT needs lines like  Label :: command ; command")
+                    } else {
+                        hooks.addMenu(title, body)
+                        hooks.status("🧩 menu '$title' created")
+                        Out("OK floating menu '$title' created")
+                    }
+                }
                 "wait" -> {
                     val s = (f["SECONDS"]?.toIntOrNull() ?: 3).coerceIn(1, 120)
                     hooks.status("⏳ waiting ${s}s")

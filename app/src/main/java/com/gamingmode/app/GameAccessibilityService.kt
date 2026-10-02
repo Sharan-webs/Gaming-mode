@@ -7,6 +7,9 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.Path
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import kotlin.math.hypot
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -43,6 +46,19 @@ class GameAccessibilityService : AccessibilityService() {
     fun stroke(pts: List<Pair<Float, Float>>, durMs: Long, onEnd: (() -> Unit)?) {
         if (pts.isEmpty()) {
             onEnd?.invoke()
+            return
+        }
+        if (pts.size <= 2 && getSharedPreferences("gm", MODE_PRIVATE).getBoolean("shell_input", false) && Shell.ready()) {
+            val a = pts[0]
+            val b = pts.last()
+            val d = durMs.coerceIn(1L, 60000L)
+            Thread {
+                val moved = hypot(b.first - a.first, b.second - a.second) > 20f
+                val cmd = if (!moved && d < 150L) "input tap ${a.first.toInt()} ${a.second.toInt()}"
+                else "input swipe ${a.first.toInt()} ${a.second.toInt()} ${b.first.toInt()} ${b.second.toInt()} $d"
+                Shell.run(cmd, 10000L)
+                Handler(Looper.getMainLooper()).post { onEnd?.invoke() }
+            }.start()
             return
         }
         val path = Path()

@@ -88,6 +88,7 @@ class GamingService : Service(), Agent.Hooks {
         createChannels()
         Keys.openrouter = prefs.getString("or_key", "") ?: ""
         Master.enableAccessibility(this)
+        Thread { if (Shell.ready()) Shell.grantSelf(this) }.start()
         val showPi = PendingIntent.getService(
             this, 0, Intent(this, GamingService::class.java).setAction("SHOW_ICON"),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -139,6 +140,34 @@ class GamingService : Service(), Agent.Hooks {
     override fun addButton(label: String, script: String) {
         ScriptStore.save(this, Script(label, script))
         main.post { addScriptButton(Script(label, script)) }
+    }
+
+    override fun addMenu(title: String, items: String) {
+        val s = Script(title, "#menu\n" + items)
+        ScriptStore.save(this, s)
+        main.post { addScriptButton(s) }
+    }
+
+    private fun showScriptMenu(s: Script) {
+        val c = card()
+        c.addView(header("🧩 " + s.name))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        for (line in s.body.lines().drop(1)) {
+            val i = line.indexOf("::")
+            if (i <= 0) continue
+            val label = line.substring(0, i).trim()
+            val script = line.substring(i + 2).split(";").joinToString("\n") { it.trim() }
+            val key = s.name + "/" + label
+            col.addView(UI.button(this, label) {
+                val r = runners.getOrPut(key) { ScriptRunner(this) }
+                if (r.running) r.stop() else r.start(script) {}
+            }, UI.match(this, 8))
+        }
+        val sv = ScrollView(this)
+        sv.addView(col)
+        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        showPanel(c)
     }
 
     override fun macroSaved(name: String) {
@@ -324,21 +353,119 @@ class GamingService : Service(), Agent.Hooks {
     private fun showMenu() {
         val c = card()
         c.addView(header("🎮 Gaming Mode"))
-        c.addView(UI.button(this, "📺 DPI increaser") {
-            toast("DPI changing needs Shizuku, which is not part of this build. Real DPI values are numbers like 320, 420 or 480.")
-        }, UI.match(this, 10))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(UI.button(this, "📺 DPI changer") { showDpi() }, UI.match(this, 8))
         val sens = UI.button(this, sensLabel()) {}
         sens.setOnClickListener {
             toggleSens()
             sens.text = sensLabel()
         }
-        c.addView(sens, UI.match(this))
-        c.addView(UI.button(this, "🤖 AI Corp") { openAiCorp() }, UI.match(this))
-        c.addView(UI.button(this, "🎬 Screen record macro") { showMacroMenu() }, UI.match(this))
-        c.addView(UI.button(this, "🧠 AI memory") { showMemory() }, UI.match(this))
-        c.addView(UI.button(this, "🧩 My buttons") { showScriptList() }, UI.match(this))
-        c.addView(UI.button(this, "📩 Contact admin") { contactAdmin() }, UI.match(this))
+        col.addView(sens, UI.match(this))
+        col.addView(UI.button(this, "🤖 AI Corp") { openAiCorp() }, UI.match(this))
+        col.addView(UI.button(this, "🎬 Screen record macro") { showMacroMenu() }, UI.match(this))
+        col.addView(UI.button(this, "🧠 AI memory") { showMemory() }, UI.match(this))
+        col.addView(UI.button(this, "🧩 My buttons") { showScriptList() }, UI.match(this))
+        col.addView(UI.button(this, "🛡 Shizuku tools") { showShizuku() }, UI.match(this))
+        col.addView(UI.button(this, "💻 Console") { showConsole() }, UI.match(this))
+        col.addView(UI.button(this, "📩 Contact admin") { contactAdmin() }, UI.match(this))
+        val sv = ScrollView(this)
+        sv.addView(col)
+        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.62f).toInt()))
         showPanel(c)
+    }
+
+    // ---------- Shizuku tools ----------
+
+    private val dpiValues = listOf(240, 280, 320, 360, 400, 440, 480, 520, 560, 600)
+
+    private fun shellTapLabel() =
+        if (prefs.getBoolean("shell_input", false)) "👆 Shizuku taps: ON (work while you touch)" else "👆 Shizuku taps: OFF"
+
+    private fun showShizuku() {
+        val c = card()
+        c.addView(header("🛡 Shizuku tools"))
+        val ok = Shell.ready()
+        c.addView(
+            UI.text(this, if (ok) "Shizuku: CONNECTED" else "Shizuku: not running. Start it in the Shizuku app and allow this app.", 13f, if (ok) UI.GREEN else UI.RED, true),
+            UI.match(this, 8)
+        )
+        c.addView(UI.button(this, "🔓 Give this app every permission") {
+            Thread { toast(Shell.grantSelf(this).take(250)) }.start()
+        }, UI.match(this, 10))
+        val tapBtn = UI.button(this, shellTapLabel()) {}
+        tapBtn.setOnClickListener {
+            prefs.edit().putBoolean("shell_input", !prefs.getBoolean("shell_input", false)).apply()
+            tapBtn.text = shellTapLabel()
+        }
+        c.addView(tapBtn, UI.match(this))
+        c.addView(UI.button(this, "📺 DPI changer") { showDpi() }, UI.match(this))
+        c.addView(UI.button(this, "💻 Console") { showConsole() }, UI.match(this))
+        showPanel(c)
+    }
+
+    private fun showDpi() {
+        val c = card()
+        c.addView(header("📺 DPI changer"))
+        if (!Shell.ready()) {
+            c.addView(UI.text(this, "Needs Shizuku. Start it, allow this app, then open this again.", 12f, UI.RED), UI.match(this, 10))
+            showPanel(c)
+            return
+        }
+        val active = prefs.getInt("dpi_on", 0)
+        c.addView(UI.text(this, "Real density values. Only one can be on; tap it again to reset.", 11f, UI.MUTED), UI.match(this, 6))
+        val list = LinearLayout(this)
+        list.orientation = LinearLayout.VERTICAL
+        for (v in dpiValues) {
+            if (active != 0 && active != v) continue
+            val on = active == v
+            list.addView(UI.button(this, if (on) "ON  $v  - tap to reset" else "$v", if (on) UI.GREEN else UI.CARD) {
+                Thread {
+                    if (on) {
+                        Shell.run("wm density reset")
+                        prefs.edit().putInt("dpi_on", 0).apply()
+                    } else {
+                        Shell.run("wm density $v")
+                        prefs.edit().putInt("dpi_on", v).apply()
+                    }
+                    main.post { showDpi() }
+                }.start()
+            }, UI.match(this, 6))
+        }
+        val sv = ScrollView(this)
+        sv.addView(list)
+        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (active == 0) dp(230) else ViewGroup.LayoutParams.WRAP_CONTENT))
+        showPanel(c)
+    }
+
+    private fun showConsole() {
+        val c = card()
+        c.addView(header("💻 Console (Shizuku shell)"))
+        val out = UI.text(this, "Type a command, for example:  ls /sdcard/Android/data", 12f, UI.MUTED)
+        val sc = ScrollView(this)
+        sc.addView(out)
+        c.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        val et = UI.edit(this, "command…")
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.addView(et, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(UI.button(this, "Run", UI.ACCENT) {
+            val cmd = et.text.toString().trim()
+            if (cmd.isNotEmpty()) {
+                out.text = out.text.toString() + "\n$ " + cmd
+                et.setText("")
+                Thread {
+                    val r = Shell.run(cmd)
+                    main.post {
+                        out.text = (out.text.toString() + "\n" + r).takeLast(6000)
+                        sc.post { sc.fullScroll(View.FOCUS_DOWN) }
+                    }
+                }.start()
+            }
+        })
+        c.addView(row, UI.match(this, 8))
+        showPanel(c, true)
     }
 
     private fun sensLabel() =
@@ -849,7 +976,9 @@ class GamingService : Service(), Agent.Hooks {
         p.y = dp(380) + scriptButtons.size * dp(62)
         val runner = runners.getOrPut(s.name) { ScriptRunner(this) }
         drag(v, p, {
-            if (runner.running) {
+            if (s.body.startsWith("#menu")) {
+                showScriptMenu(s)
+            } else if (runner.running) {
                 runner.stop()
                 v.alpha = 1f
             } else {
