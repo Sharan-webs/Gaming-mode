@@ -1,7 +1,7 @@
 package com.gamingmode.app
 
-import android.content.Context
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
@@ -9,17 +9,17 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
 import org.json.JSONTokener
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * The "coding" AI. It can search the web, read pages, and create / read / list files.
- * Files are limited to three workspace folders: internal storage, shared storage and the SD card (if present).
+ * The "coding" AI (screenshot detection OFF). It searches the web, reads and writes files, runs JavaScript,
+ * reads the screen as text, controls the phone, changes settings and creates floating buttons.
  */
 class Coder(private val ctx: Context, private val hooks: Agent.Hooks) {
 
@@ -30,8 +30,8 @@ class Coder(private val ctx: Context, private val hooks: Agent.Hooks) {
     private val ui = Handler(Looper.getMainLooper())
 
     private val system = """
-You are an agent inside an Android app. Every reply is exactly ONE action: plain text, one field per line, no markdown.
-Example (write a file):
+You are an agent inside an Android app with master access to the phone. Reply with one or more ACTION blocks (they run in order, put done last). Plain text, one field per line, no markdown.
+Example:
 ACTION: write
 ROOT: phone
 PATH: Download/test.txt
@@ -39,10 +39,15 @@ CONTENT:
 <<<
 file text
 >>>
-Other actions use the same style: search (QUERY), fetch (URL), read / list (ROOT, PATH), screen (visible text + tap coordinates of the current app), tap (X, Y), swipe (X1, Y1, X2, Y2), type (TEXT), key (KEY: back|home|recents), wait (SECONDS), js (CONTENT block; sandboxed console, console.log or last expression is the result), done (TEXT: short summary).
-ROOT: internal = app storage, shared = GamingModeAI folder, sdcard = SD card GamingModeAI folder, phone = all phone storage, sdroot = whole SD card (Android blocks Android/data and Android/obb). Paths are relative to the root. Files outside your own folders are backed up as .bak before overwriting.
-Write complete working files. Only search or fetch when needed. Keep replies short.
+ACTION: done
+TEXT: summary
+Actions: search (QUERY) | fetch (URL) | read, list (ROOT, PATH) | write (ROOT, PATH, CONTENT) | screen (visible text + tap coordinates) | tap (X, Y) | swipe (X1, Y1, X2, Y2) | type (TEXT) | key (KEY: back|home|recents|notifications|quick|power|lock) | open (NAME: app name or package) | setting (NS: system|secure|global, KEY, VALUE) | getsetting (NS, KEY) | wait (SECONDS) | js (CONTENT: sandboxed JavaScript, console.log or last expression is the result) | button (LABEL, CONTENT: script) | done (TEXT).
+button creates a floating on-screen button that runs a script. Script lines: tap X Y | hold X Y MS | swipe X1 Y1 X2 Y2 [MS] | wait MS | key NAME | type TEXT | open NAME | setting NS KEY VALUE | brightness 0-255 | volume 0-100 | repeat N ... end | forever ... end. Coordinates are screen pixels (use screen to find them). Never write Android source files to make a button: use button.
+ROOT: internal, shared (GamingModeAI folder), sdcard (SD GamingModeAI folder), phone (all phone storage), sdroot (whole SD card). Android blocks Android/data and Android/obb. Files outside your own folders get a .bak backup before being overwritten.
+If screen shows nothing, the app is probably a game: tell the user to switch screenshot detection ON. Keep replies short.
 """.trimIndent()
+
+    private val accErr = "ERROR: the accessibility service is not connected. The user must turn it off and on once in Settings (or use Master access)."
 
     fun stop() {
         running = false
@@ -75,14 +80,12 @@ Write complete working files. Only search or fetch when needed. Keep replies sho
     }
 
     private class Cmd(val action: String, val fields: Map<String, String>, val content: String?)
+    private class Out(val text: String, val done: Boolean = false)
 
-    private fun parseCmd(reply: String): Cmd? {
-        val lines = GroqClient.clean(reply).lines()
-        val start = lines.indexOfFirst { it.trim().startsWith("ACTION:") }
-        if (start < 0) return null
+    private fun parseBlock(lines: List<String>): Cmd? {
         val fields = HashMap<String, String>()
         var content: String? = null
-        var i = start
+        var i = 0
         while (i < lines.size) {
             val t = lines[i].trim()
             if (t.startsWith("CONTENT:")) {
@@ -98,6 +101,25 @@ Write complete working files. Only search or fetch when needed. Keep replies sho
         }
         val action = fields["ACTION"]?.lowercase() ?: return null
         return Cmd(action, fields, content)
+    }
+
+    private fun parseCmds(reply: String): List<Cmd> {
+        val lines = GroqClient.clean(reply).lines()
+        val blocks = ArrayList<MutableList<String>>()
+        var inside = false
+        for (l in lines) {
+            val t = l.trim()
+            if (!inside && t.startsWith("ACTION:")) blocks.add(ArrayList())
+            if (blocks.isNotEmpty()) blocks.last().add(l)
+            if (t.startsWith("<<<")) inside = !(t.length > 6 && t.endsWith(">>>"))
+            else if (inside && t.endsWith(">>>")) inside = false
+        }
+        val out = ArrayList<Cmd>()
+        for (b in blocks) {
+            val c = parseBlock(b)
+            if (c != null) out.add(c)
+        }
+        return out
     }
 
     /** A sandboxed JavaScript console: runs code in a hidden WebView with no file or app access. */
@@ -179,39 +201,228 @@ Write complete working files. Only search or fetch when needed. Keep replies sho
         return strip(httpGet(url, 300000)).take(6000)
     }
 
-    fun run(key: String, model: String, task: String) {
+    private fun exec(cmd: Cmd): Out {
+        val f = cmd.fields
+        val root = (f["ROOT"] ?: "internal").lowercase()
+        val path = f["PATH"] ?: ""
+        return try {
+            when (cmd.action) {
+                "search" -> {
+                    hooks.status("🔎 " + (f["QUERY"] ?: ""))
+                    Out(webSearch(f["QUERY"] ?: ""))
+                }
+                "fetch" -> {
+                    hooks.status("🌐 " + (f["URL"] ?: ""))
+                    Out(fetchUrl(f["URL"] ?: ""))
+                }
+                "write" -> {
+                    val file = resolve(root, path)
+                    val body = cmd.content
+                    if (file == null) {
+                        Out("ERROR: unknown ROOT or path outside the root")
+                    } else if (body == null) {
+                        Out("ERROR: missing CONTENT block with <<< and >>>")
+                    } else {
+                        file.parentFile?.mkdirs()
+                        if ((root == "phone" || root == "sdroot") && file.exists()) {
+                            val bak = File(file.path + ".bak")
+                            if (!bak.exists()) file.copyTo(bak)
+                        }
+                        file.writeText(body)
+                        hooks.status("📝 wrote $root/$path (${body.length} chars)")
+                        Out("OK wrote " + file.absolutePath)
+                    }
+                }
+                "read" -> {
+                    val file = resolve(root, path)
+                    hooks.status("📖 read $root/$path")
+                    Out(if (file == null || !file.isFile) "ERROR: file not found" else file.readText().take(6000))
+                }
+                "list" -> {
+                    val dir = resolve(root, path)
+                    hooks.status("📁 list $root/$path")
+                    Out(if (dir == null || !dir.isDirectory) "ERROR: folder not found" else (dir.list()?.sorted()?.joinToString("\n") ?: "(empty)"))
+                }
+                "screen" -> {
+                    hooks.status("👀 reading the screen")
+                    Out(GameAccessibilityService.instance?.dumpScreen() ?: accErr)
+                }
+                "tap" -> {
+                    val x = f["X"]?.toFloatOrNull()
+                    val y = f["Y"]?.toFloatOrNull()
+                    val svc = GameAccessibilityService.instance
+                    if (x == null || y == null) {
+                        Out("ERROR: X and Y must be numbers")
+                    } else if (svc == null) {
+                        Out(accErr)
+                    } else {
+                        hooks.status("👆 tap ${x.toInt()},${y.toInt()}")
+                        ui.post { svc.stroke(listOf(Pair(x, y)), 60L, null) }
+                        Thread.sleep(600)
+                        Out("OK tapped")
+                    }
+                }
+                "swipe" -> {
+                    val x1 = f["X1"]?.toFloatOrNull()
+                    val y1 = f["Y1"]?.toFloatOrNull()
+                    val x2 = f["X2"]?.toFloatOrNull()
+                    val y2 = f["Y2"]?.toFloatOrNull()
+                    val svc = GameAccessibilityService.instance
+                    if (x1 == null || y1 == null || x2 == null || y2 == null) {
+                        Out("ERROR: X1 Y1 X2 Y2 must be numbers")
+                    } else if (svc == null) {
+                        Out(accErr)
+                    } else {
+                        hooks.status("👆 swipe")
+                        ui.post { svc.stroke(listOf(Pair(x1, y1), Pair(x2, y2)), 400L, null) }
+                        Thread.sleep(800)
+                        Out("OK swiped")
+                    }
+                }
+                "type" -> {
+                    val svc = GameAccessibilityService.instance
+                    val t = f["TEXT"] ?: ""
+                    if (svc == null) {
+                        Out(accErr)
+                    } else {
+                        hooks.status("⌨ typing")
+                        ui.post { svc.typeText(t) }
+                        Thread.sleep(500)
+                        Out("OK typed (a text field must be focused)")
+                    }
+                }
+                "key" -> {
+                    val svc = GameAccessibilityService.instance
+                    val k = (f["KEY"] ?: "").lowercase()
+                    val code = when (k) {
+                        "back" -> AccessibilityService.GLOBAL_ACTION_BACK
+                        "home" -> AccessibilityService.GLOBAL_ACTION_HOME
+                        "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
+                        "notifications" -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
+                        "quick" -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+                        "power" -> AccessibilityService.GLOBAL_ACTION_POWER_DIALOG
+                        "lock" -> AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+                        else -> -1
+                    }
+                    if (svc == null) {
+                        Out(accErr)
+                    } else if (code < 0) {
+                        Out("ERROR: KEY must be back, home, recents, notifications, quick, power or lock")
+                    } else {
+                        hooks.status("🔘 $k")
+                        ui.post { svc.performGlobalAction(code) }
+                        Thread.sleep(600)
+                        Out("OK pressed $k")
+                    }
+                }
+                "open" -> {
+                    hooks.status("📱 open " + (f["NAME"] ?: ""))
+                    val r = PhoneCtl.openApp(ctx, f["NAME"] ?: "")
+                    Thread.sleep(900)
+                    Out(r)
+                }
+                "setting" -> {
+                    hooks.status("⚙ setting " + (f["KEY"] ?: ""))
+                    Out(PhoneCtl.setSetting(ctx, f["NS"] ?: "", f["KEY"] ?: "", f["VALUE"] ?: ""))
+                }
+                "getsetting" -> Out(PhoneCtl.getSetting(ctx, f["NS"] ?: "", f["KEY"] ?: ""))
+                "wait" -> {
+                    val s = (f["SECONDS"]?.toIntOrNull() ?: 3).coerceIn(1, 120)
+                    hooks.status("⏳ waiting ${s}s")
+                    Thread.sleep(s * 1000L)
+                    Out("OK waited")
+                }
+                "js" -> {
+                    hooks.status("⚙ running JavaScript")
+                    Out(runJs(cmd.content ?: ""))
+                }
+                "button" -> {
+                    val label = (f["LABEL"] ?: "AI").trim().ifEmpty { "AI" }
+                    val body = cmd.content ?: ""
+                    if (body.isBlank()) {
+                        Out("ERROR: missing CONTENT script")
+                    } else {
+                        hooks.addButton(label, body)
+                        hooks.status("🧩 button '$label' created")
+                        Out("OK floating button '$label' created")
+                    }
+                }
+                "done" -> {
+                    hooks.status("✅ " + (f["TEXT"] ?: "Done"))
+                    Out(f["TEXT"] ?: "Done", true)
+                }
+                else -> Out("ERROR: unknown action '${cmd.action}'")
+            }
+        } catch (e: InterruptedException) {
+            throw e
+        } catch (e: Exception) {
+            hooks.status("⚠ " + (e.message ?: "error").take(120))
+            Out("ERROR: ${e.message}. (Shared storage and SD card need the 'All files access' permission.)")
+        }
+    }
+
+    fun run(key: String, modelList: String, task: String) {
         if (running) return
         running = true
         thread = Thread {
+            val models = modelList.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                .ifEmpty { listOf("openai/gpt-oss-120b") }
+            var mi = 0
+            var limitedRow = 0
             val log = StringBuilder()
             var invalid = 0
+            var errors = 0
             var step = 0
             try {
-                while (running && step < 60) {
+                outer@ while (running && step < 80) {
                     step++
-                    val prompt = AiMemory.asPrompt(ctx) + "Task: $task\n\nLog:\n" + log.takeLast(6000) + "\n\nNext action?"
-                    hooks.status("Step $step: thinking…")
+                    val prompt = AiMemory.asPrompt(ctx) + "Task: $task\n\nLog:\n" + log.takeLast(6000) + "\n\nNext action(s)?"
+                    hooks.status("Step $step (${models[mi].substringAfterLast('/')})…")
+                    var limitWait = -1L
                     val reply = try {
-                        GroqClient.chat(key, model, system + Persona.text(ctx), prompt, emptyList(), 6000)
+                        GroqClient.chat(key, models[mi], system + Persona.text(ctx), prompt, emptyList(), 6000)
                     } catch (e: InterruptedException) {
                         throw e
                     } catch (e: RateLimitException) {
-                        if (e.waitSec > 180) {
-                            hooks.status("Rate limit: try again in about ${e.waitSec / 60} min, or change the model in the gear settings.")
+                        limitWait = e.waitSec
+                        null
+                    } catch (e: Exception) {
+                        errors++
+                        hooks.status("AI error: " + (e.message ?: "").take(150))
+                        null
+                    }
+                    if (reply == null) {
+                        if (limitWait >= 0) {
+                            limitedRow++
+                            if (models.size > 1 && limitedRow < models.size) {
+                                mi = (mi + 1) % models.size
+                                hooks.status("Limit reached. Switching to ${models[mi]} (same task and memory)…")
+                                continue
+                            }
+                            limitedRow = 0
+                            if (limitWait > 180) {
+                                hooks.status("All models are limited. Try again in about ${limitWait / 60} min, or add more models in the gear settings.")
+                                break
+                            }
+                            hooks.status("Rate limit hit. Waiting ${limitWait}s, then I'll continue…")
+                            Thread.sleep(limitWait * 1000L)
+                            continue
+                        }
+                        if (models.size > 1) {
+                            mi = (mi + 1) % models.size
+                            hooks.status("Switching to ${models[mi]} (same task and memory)…")
+                        }
+                        if (errors >= 6) {
+                            hooks.status("Stopped: too many AI errors. Check the key and the model names in the gear settings.")
                             break
                         }
-                        hooks.status("Rate limit hit. Waiting ${e.waitSec}s…")
-                        Thread.sleep(e.waitSec * 1000L)
-                        continue
-                    } catch (e: Exception) {
-                        hooks.status("AI error: " + (e.message ?: "").take(150))
-                        invalid++
-                        if (invalid >= 4) break
-                        Thread.sleep(5000)
+                        Thread.sleep(3000)
                         continue
                     }
-                    val cmd = parseCmd(reply)
-                    if (cmd == null) {
+                    errors = 0
+                    limitedRow = 0
+                    val cmds = parseCmds(reply)
+                    if (cmds.isEmpty()) {
                         invalid++
                         if (invalid >= 3) {
                             hooks.status("AI: " + reply.take(300))
@@ -221,134 +432,14 @@ Write complete working files. Only search or fetch when needed. Keep replies sho
                         continue
                     }
                     invalid = 0
-                    val f = cmd.fields
-                    val root = (f["ROOT"] ?: "internal").lowercase()
-                    val path = f["PATH"] ?: ""
-                    var result: String
-                    try {
-                        when (cmd.action) {
-                            "search" -> {
-                                hooks.status("🔎 search: " + (f["QUERY"] ?: ""))
-                                result = webSearch(f["QUERY"] ?: "")
-                            }
-                            "fetch" -> {
-                                hooks.status("🌐 read: " + (f["URL"] ?: ""))
-                                result = fetchUrl(f["URL"] ?: "")
-                            }
-                            "write" -> {
-                                val file = resolve(root, path)
-                                val body = cmd.content
-                                if (file == null) {
-                                    result = "ERROR: unknown root or path outside the workspace"
-                                } else if (body == null) {
-                                    result = "ERROR: missing CONTENT block with <<< and >>>"
-                                } else {
-                                    file.parentFile?.mkdirs()
-                                    if ((root == "phone" || root == "sdroot") && file.exists()) {
-                                        val bak = File(file.path + ".bak")
-                                        if (!bak.exists()) file.copyTo(bak)
-                                    }
-                                    file.writeText(body)
-                                    hooks.status("📝 wrote $root/$path (${body.length} chars)")
-                                    result = "OK wrote ${file.absolutePath}"
-                                }
-                            }
-                            "read" -> {
-                                val file = resolve(root, path)
-                                result = if (file == null || !file.isFile) "ERROR: file not found" else file.readText().take(6000)
-                                hooks.status("📖 read $root/$path")
-                            }
-                            "list" -> {
-                                val dir = resolve(root, path)
-                                result = if (dir == null || !dir.isDirectory) "ERROR: folder not found"
-                                else (dir.list()?.sorted()?.joinToString("\n") ?: "(empty)")
-                                hooks.status("📁 list $root/$path")
-                            }
-                            "screen" -> {
-                                hooks.status("👀 reading the screen")
-                                result = GameAccessibilityService.instance?.dumpScreen() ?: "ERROR: accessibility is off"
-                            }
-                            "tap" -> {
-                                val x = f["X"]?.toFloatOrNull()
-                                val y = f["Y"]?.toFloatOrNull()
-                                val svc = GameAccessibilityService.instance
-                                if (x == null || y == null) result = "ERROR: X and Y must be numbers"
-                                else if (svc == null) result = "ERROR: accessibility is off"
-                                else {
-                                    hooks.status("👆 tap ${x.toInt()},${y.toInt()}")
-                                    ui.post { svc.stroke(listOf(Pair(x, y)), 60L, null) }
-                                    Thread.sleep(700)
-                                    result = "OK tapped"
-                                }
-                            }
-                            "swipe" -> {
-                                val x1 = f["X1"]?.toFloatOrNull()
-                                val y1 = f["Y1"]?.toFloatOrNull()
-                                val x2 = f["X2"]?.toFloatOrNull()
-                                val y2 = f["Y2"]?.toFloatOrNull()
-                                val svc = GameAccessibilityService.instance
-                                if (x1 == null || y1 == null || x2 == null || y2 == null) result = "ERROR: X1 Y1 X2 Y2 must be numbers"
-                                else if (svc == null) result = "ERROR: accessibility is off"
-                                else {
-                                    hooks.status("👆 swipe")
-                                    ui.post { svc.stroke(listOf(Pair(x1, y1), Pair(x2, y2)), 400L, null) }
-                                    Thread.sleep(900)
-                                    result = "OK swiped"
-                                }
-                            }
-                            "type" -> {
-                                val svc = GameAccessibilityService.instance
-                                val t = f["TEXT"] ?: ""
-                                if (svc == null) result = "ERROR: accessibility is off"
-                                else {
-                                    hooks.status("⌨ typing")
-                                    ui.post { svc.typeText(t) }
-                                    Thread.sleep(600)
-                                    result = "OK typed (a text field must be focused)"
-                                }
-                            }
-                            "key" -> {
-                                val svc = GameAccessibilityService.instance
-                                val k = (f["KEY"] ?: "").lowercase()
-                                val code = when (k) {
-                                    "back" -> AccessibilityService.GLOBAL_ACTION_BACK
-                                    "home" -> AccessibilityService.GLOBAL_ACTION_HOME
-                                    "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
-                                    else -> -1
-                                }
-                                if (svc == null) result = "ERROR: accessibility is off"
-                                else if (code < 0) result = "ERROR: KEY must be back, home or recents"
-                                else {
-                                    hooks.status("🔘 $k")
-                                    ui.post { svc.performGlobalAction(code) }
-                                    Thread.sleep(700)
-                                    result = "OK pressed $k"
-                                }
-                            }
-                            "wait" -> {
-                                val s = (f["SECONDS"]?.toIntOrNull() ?: 3).coerceIn(1, 120)
-                                hooks.status("⏳ waiting ${s}s")
-                                Thread.sleep(s * 1000L)
-                                result = "OK waited"
-                            }
-                            "js" -> {
-                                hooks.status("⚙ running JavaScript")
-                                result = runJs(cmd.content ?: "")
-                            }
-                            "done" -> {
-                                hooks.status("✅ " + (f["TEXT"] ?: "Done"))
-                                break
-                            }
-                            else -> result = "ERROR: unknown action '${cmd.action}'"
-                        }
-                    } catch (e: InterruptedException) {
-                        throw e
-                    } catch (e: Exception) {
-                        result = "ERROR: ${e.message}. (Shared storage and SD card need the 'All files access' permission.)"
-                        hooks.status("⚠ " + (e.message ?: "error").take(120))
+                    for (cmd in cmds) {
+                        if (!running) break@outer
+                        val out = exec(cmd)
+                        log.append("[").append(cmd.action).append(" ")
+                            .append(cmd.fields["PATH"] ?: cmd.fields["QUERY"] ?: cmd.fields["URL"] ?: "")
+                            .append("]\n").append(out.text.take(2500)).append("\n")
+                        if (out.done) break@outer
                     }
-                    log.append("[").append(cmd.action).append(" ").append(path.ifEmpty { f["QUERY"] ?: f["URL"] ?: "" })
-                        .append("]\n").append(result.take(3000)).append("\n")
                 }
             } catch (e: InterruptedException) {
             } finally {

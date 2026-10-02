@@ -62,6 +62,8 @@ class GamingService : Service(), Agent.Hooks {
     private var codeMode = false
 
     private val macroButtons = HashMap<String, View>()
+    private val scriptButtons = HashMap<String, View>()
+    private val runners = HashMap<String, ScriptRunner>()
     private val playing = HashSet<String>()
 
     private var recCapture: View? = null
@@ -84,6 +86,8 @@ class GamingService : Service(), Agent.Hooks {
         agent = Agent(this, this)
         coder = Coder(this, this)
         createChannels()
+        Keys.openrouter = prefs.getString("or_key", "") ?: ""
+        Master.enableAccessibility(this)
         val showPi = PendingIntent.getService(
             this, 0, Intent(this, GamingService::class.java).setAction("SHOW_ICON"),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -104,6 +108,7 @@ class GamingService : Service(), Agent.Hooks {
     override fun onDestroy() {
         agent.stop()
         coder.stop()
+        for (r in runners.values) r.stop()
         for (v in ArrayList(overlayViews)) {
             try {
                 wm.removeView(v)
@@ -129,6 +134,11 @@ class GamingService : Service(), Agent.Hooks {
                 tv.text = t
             }
         }
+    }
+
+    override fun addButton(label: String, script: String) {
+        ScriptStore.save(this, Script(label, script))
+        main.post { addScriptButton(Script(label, script)) }
     }
 
     override fun macroSaved(name: String) {
@@ -326,6 +336,7 @@ class GamingService : Service(), Agent.Hooks {
         c.addView(UI.button(this, "🤖 AI Corp") { openAiCorp() }, UI.match(this))
         c.addView(UI.button(this, "🎬 Screen record macro") { showMacroMenu() }, UI.match(this))
         c.addView(UI.button(this, "🧠 AI memory") { showMemory() }, UI.match(this))
+        c.addView(UI.button(this, "🧩 My buttons") { showScriptList() }, UI.match(this))
         c.addView(UI.button(this, "📩 Contact admin") { contactAdmin() }, UI.match(this))
         showPanel(c)
     }
@@ -399,11 +410,15 @@ class GamingService : Service(), Agent.Hooks {
 
     // ---------- AI Corp ----------
 
-    private fun visionModel(): String =
-        (prefs.getString("m_vision", GroqClient.DEFAULT_VISION) ?: "").ifBlank { GroqClient.DEFAULT_VISION }
+    private fun visionModel(): String {
+        val s = (prefs.getString("m_vision", "") ?: "").trim()
+        return if (s.isEmpty() || s == "qwen/qwen3.8-27b") GroqClient.DEFAULT_VISION else s
+    }
 
-    private fun coderModel(): String =
-        (prefs.getString("m_coder", GroqClient.DEFAULT_CODER) ?: "").ifBlank { GroqClient.DEFAULT_CODER }
+    private fun coderModel(): String {
+        val s = (prefs.getString("m_coder", "") ?: "").trim()
+        return if (s.isEmpty() || s == "openai/gpt-oss-120b" || s == "openai/gpt-oss-120s") GroqClient.DEFAULT_CODER else s
+    }
 
     private fun groqKey(): String = prefs.getString("groq_key", "") ?: ""
 
@@ -451,6 +466,9 @@ class GamingService : Service(), Agent.Hooks {
         form.addView(UI.text(this, "AI persona (optional) - how the AI talks", 11f, UI.MUTED), UI.match(this, 8))
         val pe = UI.edit(this, "e.g. short, friendly gamer buddy", prefs.getString("persona", "") ?: "")
         form.addView(pe, UI.match(this, 2))
+        form.addView(UI.text(this, "OpenRouter key (optional, extra free tokens; use models like or:model-name)", 11f, UI.MUTED), UI.match(this, 8))
+        val ork = UI.edit(this, "sk-or-…", prefs.getString("or_key", "") ?: "")
+        form.addView(ork, UI.match(this, 2))
 
         val go = UI.button(this, "🚀 Let's go", UI.ACCENT) {
             val key = k.text.toString().trim()
@@ -463,6 +481,8 @@ class GamingService : Service(), Agent.Hooks {
             e.putString("m_vision", vm.text.toString().trim())
             e.putString("m_coder", cm2.text.toString().trim())
             e.putString("persona", pe.text.toString().trim())
+            e.putString("or_key", ork.text.toString().trim())
+            Keys.openrouter = ork.text.toString().trim()
             e.apply()
             closePanel()
             startInjection()
@@ -566,6 +586,11 @@ class GamingService : Service(), Agent.Hooks {
         val row2 = LinearLayout(this)
         row2.orientation = LinearLayout.HORIZONTAL
         fun cell(b: View) {
+            if (b is android.widget.Button) {
+                b.textSize = 12f
+                b.maxLines = 1
+                b.setPadding(dp(4), dp(10), dp(4), dp(10))
+            }
             val lp2 = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             lp2.marginStart = dp(2)
             lp2.marginEnd = dp(2)
@@ -602,7 +627,7 @@ class GamingService : Service(), Agent.Hooks {
         cell(UI.button(this, "Hide") { hideIcon() })
         box.addView(row2, UI.match(this, 6))
 
-        val p = lp((resources.displayMetrics.widthPixels * 0.94f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT, false)
+        val p = lp(minOf(dp(370), (resources.displayMetrics.widthPixels * 0.94f).toInt()), ViewGroup.LayoutParams.WRAP_CONTENT, false)
         p.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
         p.y = dp(40)
         p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
@@ -805,6 +830,76 @@ class GamingService : Service(), Agent.Hooks {
         macroButtons[m.name] = v
         closePanel()
         toast("Button added. Press it to run '${m.name}'. Long-press it to remove the button.")
+    }
+
+    // ---------- AI-made floating buttons ----------
+
+    private fun addScriptButton(s: Script) {
+        scriptButtons.remove(s.name)?.let { remOv(it) }
+        val v = TextView(this)
+        v.text = s.name.take(3)
+        v.textSize = 13f
+        v.setTextColor(Color.WHITE)
+        v.gravity = Gravity.CENTER
+        v.typeface = Typeface.DEFAULT_BOLD
+        v.background = UI.oval(UI.GREEN)
+        val size = dp(54)
+        val p = lp(size, size)
+        p.x = dp(90) + scriptButtons.size * dp(14)
+        p.y = dp(380) + scriptButtons.size * dp(62)
+        val runner = runners.getOrPut(s.name) { ScriptRunner(this) }
+        drag(v, p, {
+            if (runner.running) {
+                runner.stop()
+                v.alpha = 1f
+            } else {
+                v.alpha = 0.6f
+                runner.start(s.body) { v.alpha = 1f }
+            }
+        }, {
+            runner.stop()
+            remOv(v)
+            scriptButtons.remove(s.name)
+        })
+        addOv(v, p)
+        scriptButtons[s.name] = v
+        toast("Button '${s.name}' is on screen. Press to run (press again to stop). Long-press to remove it.")
+    }
+
+    private fun showScriptList() {
+        val c = card()
+        c.addView(header("🧩 My buttons"))
+        val list = ScriptStore.all(this)
+        if (list.isEmpty()) {
+            c.addView(
+                UI.text(this, "No buttons yet. Turn 📸 OFF in the AI box and ask the AI, e.g. \"make a button that taps 900 600 five times\".", 12f, UI.MUTED),
+                UI.match(this, 10)
+            )
+        } else {
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            for (s in list) {
+                val row = LinearLayout(this)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.addView(UI.text(this, s.name, 14f, Color.WHITE, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(UI.button(this, "Show", UI.ACCENT) {
+                    closePanel()
+                    addScriptButton(s)
+                })
+                row.addView(UI.button(this, "Delete", UI.RED) {
+                    ScriptStore.delete(this, s.name)
+                    scriptButtons.remove(s.name)?.let { remOv(it) }
+                    showScriptList()
+                })
+                col.addView(row, UI.match(this, 8))
+            }
+            val sv = ScrollView(this)
+            sv.addView(col)
+            val h = if (list.size > 4) dp(260) else ViewGroup.LayoutParams.WRAP_CONTENT
+            c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h))
+        }
+        showPanel(c)
     }
 
     private fun play(m: Macro) {

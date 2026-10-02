@@ -17,6 +17,7 @@ class Agent(private val ctx: Context, private val hooks: Hooks) {
         fun status(t: String)
         fun overlays(visible: Boolean)
         fun macroSaved(name: String) {}
+        fun addButton(label: String, script: String) {}
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -40,6 +41,7 @@ x,y are 0-1000 (0,0 = top-left). Actions:
 {"action":"swipe","x1":500,"y1":800,"x2":500,"y2":300,"ms":400}
 {"action":"type","text":"..."}  {"action":"back"}  {"action":"home"}  {"action":"recents"}
 {"action":"wait","seconds":5}
+{"action":"open","name":"app name"}  {"action":"setting","ns":"system","key":"screen_brightness","value":"200"}
 {"action":"save_macro","name":"jump x5","x":500,"y":800,"repeat":5,"gap_ms":150}  (find the button, save a reusable macro; or give "steps":[{"x":..,"y":..},...])
 {"action":"remember","text":"..."}  {"action":"answer","text":"..."}  {"action":"done","text":"..."}
 Repeating tasks: tap, wait, keep going; never use done until stopped. If the user says always / every time, also use remember once.
@@ -314,6 +316,18 @@ Repeating tasks: tap, wait, keep going; never use done until stopped. If the use
                                 hooks.macroSaved(name)
                                 break
                             }
+                        }
+                        "open" -> {
+                            val r = PhoneCtl.openApp(ctx, obj.optString("name", ""))
+                            history.add("open")
+                            hooks.status(r)
+                            sleepSlices(1200)
+                        }
+                        "setting" -> {
+                            val r = PhoneCtl.setSetting(ctx, obj.optString("ns", "system"), obj.optString("key", ""), obj.optString("value", ""))
+                            history.add("setting")
+                            hooks.status(r)
+                            sleepSlices(300)
                         }
                         "remember" -> {
                             val t = obj.optString("text", "")

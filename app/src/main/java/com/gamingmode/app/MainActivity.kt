@@ -71,7 +71,13 @@ class MainActivity : Activity() {
                 "Lets the AI and your macros tap, swipe, type and see the screen. If the switch is greyed out on Android 13+: open App info, tap the ⋮ menu, choose 'Allow restricted settings', then try again.",
                 true,
                 { accessibilityOn() },
-                { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                {
+                    if (Master.has(this) && Master.enableAccessibility(this)) {
+                        Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 1200)
+                    } else {
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
+                }
             ),
             Perm(
                 "Notifications",
@@ -89,6 +95,13 @@ class MainActivity : Activity() {
                         )
                     }
                 }
+            ),
+            Perm(
+                "Master access (advanced, optional)",
+                "Lets the AI change secure/global phone settings and turns the accessibility service on by itself. One-time setup from Termux.",
+                false,
+                { Master.has(this) },
+                { showMasterDialog() }
             ),
             Perm(
                 "Modify system settings (optional)",
@@ -179,12 +192,45 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (Master.has(this)) Master.enableAccessibility(this)
         refresh()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         refresh()
+    }
+
+    private fun reconnectAccessibility() {
+        if (Master.has(this) && Master.restartAccessibility(this)) {
+            Toast.makeText(this, "Reconnecting…", Toast.LENGTH_SHORT).show()
+            Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 2000)
+        } else {
+            Toast.makeText(this, "Turn the Gaming Mode service OFF and ON once.", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    private fun showMasterDialog() {
+        val cmds = "pkg install android-tools\nadb pair localhost:PAIR_PORT\nadb connect localhost:PORT\nadb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Master access")
+            .setMessage(
+                "One-time setup (Android 11+):\n" +
+                    "1. Turn on Developer options > Wireless debugging (Wi-Fi on).\n" +
+                    "2. Tap 'Pair device with pairing code' and note the pair port and the code.\n" +
+                    "3. In Termux run these lines. Replace PAIR_PORT and PORT with the numbers shown, and type the code when asked:\n\n" + cmds
+            )
+            .setPositiveButton("Copy commands") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("commands", cmds))
+                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Developer options") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun toggleGaming() {
@@ -214,6 +260,10 @@ class MainActivity : Activity() {
             val ok = p.granted()
             if (ok) {
                 card.addView(UI.text(this, "✓ Enabled", 13f, UI.GREEN, true), UI.match(this, 6))
+                if (p.title.startsWith("Accessibility") && GameAccessibilityService.instance == null) {
+                    card.addView(UI.text(this, "Enabled in settings but not connected yet. Turn it off and on once.", 12f, UI.RED), UI.match(this, 6))
+                    card.addView(UI.button(this, "Reconnect", UI.ACCENT) { reconnectAccessibility() }, UI.match(this, 6))
+                }
             } else {
                 card.addView(UI.button(this, if (p.required) "Enable" else "Enable (optional)", UI.ACCENT) { p.request() }, UI.match(this, 8))
             }

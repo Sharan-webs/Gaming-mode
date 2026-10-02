@@ -9,18 +9,20 @@ import java.net.URL
 class RateLimitException(val waitSec: Long, message: String) : RuntimeException(message)
 
 object GroqClient {
-    private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+    private const val GROQ = "https://api.groq.com/openai/v1/chat/completions"
+    private const val OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
 
-    // Groq changes its model list often. Both are editable inside the app (AI Corp settings).
+    // Comma separated lists: when one model hits its limit the app switches to the next one and carries on.
+    // A model written as  or:name  runs on OpenRouter (needs the OpenRouter key from the settings).
     const val DEFAULT_VISION = "qwen/qwen3.8-27b, qwen/qwen3.6-27b"
-    const val DEFAULT_CODER = "openai/gpt-oss-120b"
+    const val DEFAULT_CODER = "openai/gpt-oss-120b, openai/gpt-oss-20b, llama-3.3-70b-versatile"
 
     fun clean(s: String): String = s.replace(Regex("(?s)<think>.*?</think>"), "").trim()
 
     private class Resp(val code: Int, val text: String, val retryAfter: Double?)
 
-    private fun post(key: String, body: JSONObject): Resp {
-        val conn = URL(ENDPOINT).openConnection() as HttpURLConnection
+    private fun post(endpoint: String, key: String, body: JSONObject): Resp {
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 20000
         conn.readTimeout = 120000
@@ -54,6 +56,12 @@ object GroqClient {
         jpegs: List<ByteArray>,
         maxTokens: Int = 1500
     ): String {
+        val orMode = model.startsWith("or:")
+        val realModel = if (orMode) model.removePrefix("or:") else model
+        val endpoint = if (orMode) OPENROUTER else GROQ
+        val authKey = if (orMode) Keys.openrouter else key
+        if (authKey.isBlank()) throw RuntimeException(if (orMode) "Add your OpenRouter key in the gear settings." else "Missing Groq key.")
+
         val content = JSONArray()
         content.put(JSONObject().put("type", "text").put("text", user))
         for (jpeg in jpegs) {
@@ -69,14 +77,15 @@ object GroqClient {
 
         // Thinking burns lots of tokens and hits rate limits fast, so ask for as little as possible.
         val effort: String? = when {
-            model.startsWith("openai/gpt-oss") -> "low"
-            model.startsWith("qwen/") -> "none"
+            orMode -> null
+            realModel.startsWith("openai/gpt-oss") -> "low"
+            realModel.startsWith("qwen/") -> "none"
             else -> null
         }
 
         fun body(e: String?): JSONObject {
             val b = JSONObject()
-                .put("model", model)
+                .put("model", realModel)
                 .put("temperature", 0.2)
                 .put("max_tokens", maxTokens)
                 .put("messages", msgs)
@@ -84,13 +93,13 @@ object GroqClient {
             return b
         }
 
-        var r = post(key, body(effort))
+        var r = post(endpoint, authKey, body(effort))
         if (r.code == 400 && effort != null && r.text.contains("reason", ignoreCase = true)) {
-            r = post(key, body(null))
+            r = post(endpoint, authKey, body(null))
         }
         if (r.code == 429) {
             val w = waitSeconds(r)
-            throw RateLimitException(w, "Rate limit reached for '$model'. Groq says try again in ${w}s. You can also switch the model in the gear settings.")
+            throw RateLimitException(w, "Rate limit reached for '$model'. Try again in ${w}s.")
         }
         if (r.code !in 200..299) throw RuntimeException("HTTP ${r.code}: " + r.text.take(220))
         val msg = JSONObject(r.text).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
