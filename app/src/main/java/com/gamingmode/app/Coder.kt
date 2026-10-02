@@ -1,7 +1,16 @@
 package com.gamingmode.app
 
 import android.content.Context
+import android.accessibilityservice.AccessibilityService
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import org.json.JSONObject
+import org.json.JSONTokener
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -18,6 +27,7 @@ class Coder(private val ctx: Context, private val hooks: Agent.Hooks) {
     var running = false
         private set
     private var thread: Thread? = null
+    private val ui = Handler(Looper.getMainLooper())
 
     private val system = """
 You are a coding agent running inside an Android app. You work in steps; after each step you see the result.
@@ -45,11 +55,39 @@ ACTION: list
 ROOT: internal
 PATH: folder
 
+ACTION: screen
+(returns the visible text and buttons of the current app with their tap coordinates)
+
+ACTION: tap
+X: 540
+Y: 1200
+
+ACTION: swipe
+X1: 540
+Y1: 1500
+X2: 540
+Y2: 500
+
+ACTION: type
+TEXT: text to type into the focused field
+
+ACTION: key
+KEY: back | home | recents
+
+ACTION: wait
+SECONDS: 3
+
+ACTION: js
+CONTENT:
+<<<
+javascript code - use console.log or make the last expression the result
+>>>
+
 ACTION: done
 TEXT: short summary of what you built and where the files are
 
 Rules: ROOT internal = app storage, shared = phone storage folder GamingModeAI, sdcard = SD card folder GamingModeAI (only if present).
-Paths are relative to the root. You cannot run code; you write complete, working files (HTML/JS games, scripts, projects, notes).
+Paths are relative to the root. You can run JavaScript with the js action (your own console, sandboxed). Other languages cannot run here: write them as complete files. You can also control the phone: read the screen with screen, then tap / swipe / type / key.
 Build big things as several files. Search or fetch when you need up-to-date docs or examples.
 Saved memory (standing instructions from the user):
 """.trimIndent()
@@ -104,6 +142,37 @@ Saved memory (standing instructions from the user):
         }
         val action = fields["ACTION"]?.lowercase() ?: return null
         return Cmd(action, fields, content)
+    }
+
+    /** A sandboxed JavaScript console: runs code in a hidden WebView with no file or app access. */
+    private fun runJs(code: String): String {
+        if (code.isBlank()) return "ERROR: empty code (put it in a CONTENT block with <<< and >>>)"
+        val latch = CountDownLatch(1)
+        var out = "ERROR: timed out after 12 seconds"
+        val script = "(function(){var __l=[];console.log=function(){__l.push(Array.prototype.slice.call(arguments).join(' '))};" +
+            "try{var r=eval(" + JSONObject.quote(code) + ");return __l.join('\\n')+(r===undefined?'':'\\n=> '+String(r));}" +
+            "catch(e){return __l.join('\\n')+'\\nERROR: '+e;}})()"
+        ui.post {
+            val wv = WebView(ctx)
+            wv.settings.javaScriptEnabled = true
+            wv.settings.allowFileAccess = false
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    view?.evaluateJavascript(script) { res ->
+                        out = try {
+                            JSONTokener(res).nextValue().toString()
+                        } catch (e: Exception) {
+                            res ?: ""
+                        }
+                        latch.countDown()
+                        view?.destroy()
+                    }
+                }
+            }
+            wv.loadDataWithBaseURL("https://sandbox.local/", "<html><body></body></html>", "text/html", "utf-8", null)
+        }
+        latch.await(12, TimeUnit.SECONDS)
+        return out.take(3000)
     }
 
     private fun httpGet(url: String, maxBytes: Int): String {
@@ -236,6 +305,77 @@ Saved memory (standing instructions from the user):
                                 result = if (dir == null || !dir.isDirectory) "ERROR: folder not found"
                                 else (dir.list()?.sorted()?.joinToString("\n") ?: "(empty)")
                                 hooks.status("📁 list $root/$path")
+                            }
+                            "screen" -> {
+                                hooks.status("👀 reading the screen")
+                                result = GameAccessibilityService.instance?.dumpScreen() ?: "ERROR: accessibility is off"
+                            }
+                            "tap" -> {
+                                val x = f["X"]?.toFloatOrNull()
+                                val y = f["Y"]?.toFloatOrNull()
+                                val svc = GameAccessibilityService.instance
+                                if (x == null || y == null) result = "ERROR: X and Y must be numbers"
+                                else if (svc == null) result = "ERROR: accessibility is off"
+                                else {
+                                    hooks.status("👆 tap ${x.toInt()},${y.toInt()}")
+                                    ui.post { svc.stroke(listOf(Pair(x, y)), 60L, null) }
+                                    Thread.sleep(700)
+                                    result = "OK tapped"
+                                }
+                            }
+                            "swipe" -> {
+                                val x1 = f["X1"]?.toFloatOrNull()
+                                val y1 = f["Y1"]?.toFloatOrNull()
+                                val x2 = f["X2"]?.toFloatOrNull()
+                                val y2 = f["Y2"]?.toFloatOrNull()
+                                val svc = GameAccessibilityService.instance
+                                if (x1 == null || y1 == null || x2 == null || y2 == null) result = "ERROR: X1 Y1 X2 Y2 must be numbers"
+                                else if (svc == null) result = "ERROR: accessibility is off"
+                                else {
+                                    hooks.status("👆 swipe")
+                                    ui.post { svc.stroke(listOf(Pair(x1, y1), Pair(x2, y2)), 400L, null) }
+                                    Thread.sleep(900)
+                                    result = "OK swiped"
+                                }
+                            }
+                            "type" -> {
+                                val svc = GameAccessibilityService.instance
+                                val t = f["TEXT"] ?: ""
+                                if (svc == null) result = "ERROR: accessibility is off"
+                                else {
+                                    hooks.status("⌨ typing")
+                                    ui.post { svc.typeText(t) }
+                                    Thread.sleep(600)
+                                    result = "OK typed (a text field must be focused)"
+                                }
+                            }
+                            "key" -> {
+                                val svc = GameAccessibilityService.instance
+                                val k = (f["KEY"] ?: "").lowercase()
+                                val code = when (k) {
+                                    "back" -> AccessibilityService.GLOBAL_ACTION_BACK
+                                    "home" -> AccessibilityService.GLOBAL_ACTION_HOME
+                                    "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
+                                    else -> -1
+                                }
+                                if (svc == null) result = "ERROR: accessibility is off"
+                                else if (code < 0) result = "ERROR: KEY must be back, home or recents"
+                                else {
+                                    hooks.status("🔘 $k")
+                                    ui.post { svc.performGlobalAction(code) }
+                                    Thread.sleep(700)
+                                    result = "OK pressed $k"
+                                }
+                            }
+                            "wait" -> {
+                                val s = (f["SECONDS"]?.toIntOrNull() ?: 3).coerceIn(1, 120)
+                                hooks.status("⏳ waiting ${s}s")
+                                Thread.sleep(s * 1000L)
+                                result = "OK waited"
+                            }
+                            "js" -> {
+                                hooks.status("⚙ running JavaScript")
+                                result = runJs(cmd.content ?: "")
                             }
                             "done" -> {
                                 hooks.status("✅ " + (f["TEXT"] ?: "Done"))

@@ -114,7 +114,7 @@ The user's saved memory below contains standing instructions you must follow.
                 val img = capture()
                     ?: throw RuntimeException("Could not take a screenshot (is the accessibility permission on?)")
                 val r = GroqClient.chat(
-                    key, model,
+                    key, model.split(",")[0].trim(),
                     "You describe phone screenshots briefly.",
                     "Which app or game is on this screen? Answer in 8 words or fewer.",
                     listOf(img), 200
@@ -132,6 +132,10 @@ The user's saved memory below contains standing instructions you must follow.
         prevImg = null
         thread = Thread {
             val history = ArrayList<String>()
+            val models = model.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                .ifEmpty { listOf("qwen/qwen3.8-27b") }
+            var mi = 0
+            var limitedRow = 0
             var step = 0
             var errors = 0
             try {
@@ -156,7 +160,7 @@ The user's saved memory below contains standing instructions you must follow.
                     prevImg = img
                     var limitWait = -1L
                     val reply = try {
-                        GroqClient.chat(key, model, system, prompt, frames, 700)
+                        GroqClient.chat(key, models[mi], system, prompt, frames, 700)
                     } catch (e: InterruptedException) {
                         throw e
                     } catch (e: RateLimitException) {
@@ -168,6 +172,13 @@ The user's saved memory below contains standing instructions you must follow.
                         null
                     }
                     if (reply == null && limitWait >= 0) {
+                        limitedRow++
+                        if (models.size > 1 && limitedRow < models.size) {
+                            mi = (mi + 1) % models.size
+                            hooks.status("Rate limit on one model. Switching to ${models[mi]}…")
+                            continue
+                        }
+                        limitedRow = 0
                         if (limitWait > 180) {
                             hooks.status("Rate limit: Groq says try again in about ${limitWait / 60} min. Switch the model in the gear settings, or wait.")
                             break
@@ -185,6 +196,7 @@ The user's saved memory below contains standing instructions you must follow.
                         continue
                     }
                     errors = 0
+                    limitedRow = 0
                     val obj = parse(reply)
                     if (obj == null) {
                         hooks.status("AI: " + reply.trim().take(300))

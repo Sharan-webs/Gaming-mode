@@ -477,7 +477,7 @@ class GamingService : Service(), Agent.Hooks {
                     showInputBox("Couldn't read the screen: $err\nYou can still type instructions.")
                 }
             } else {
-                showInputBox("Detected: $result\nControl mode: tell me what to do. Tap 💻 for coding mode.")
+                showInputBox("Detected: $result\nScreenshot detection is ON - tell me what to do. Tap 📸 to switch it OFF (coding AI).")
             }
         }
     }
@@ -560,15 +560,16 @@ class GamingService : Service(), Agent.Hooks {
             lp2.marginEnd = dp(2)
             row2.addView(b, lp2)
         }
-        val modeBtn = UI.button(this, "🎮") {}
+        val modeBtn = UI.button(this, "📸 ON", UI.ACCENT) {}
         modeBtn.setOnClickListener {
             codeMode = !codeMode
-            modeBtn.text = if (codeMode) "💻" else "🎮"
+            modeBtn.text = if (codeMode) "📸 OFF" else "📸 ON"
+            modeBtn.background = UI.bg(this, if (codeMode) UI.CARD else UI.ACCENT, 12f)
             if (codeMode) {
-                tv.text = "Coding mode: I can search the web, read pages and write files to internal storage, phone storage and the SD card."
-                et.hint = "Tell me what to build…"
+                tv.text = "Screenshot detection OFF - coding AI: reads the screen as text, taps, types, searches the web, runs JavaScript and reads / writes files."
+                et.hint = "Tell me what to do or build…"
             } else {
-                tv.text = "Control mode: I look at the screen and tap, swipe and type."
+                tv.text = "Screenshot detection ON - the AI looks at screenshots and taps, swipes and types."
                 et.hint = "Type any instruction or question…"
             }
         }

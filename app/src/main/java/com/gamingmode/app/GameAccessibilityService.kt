@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.Path
 import android.os.Bundle
 import android.view.Display
@@ -61,6 +62,33 @@ class GameAccessibilityService : AccessibilityService() {
             }
         }, null)
         if (!ok) onEnd?.invoke()
+    }
+
+    /** Lists visible text / buttons with their centre coordinates (works in normal apps; games usually show nothing). */
+    fun dumpScreen(): String {
+        val root = rootInActiveWindow ?: return "(no readable window)"
+        val sb = StringBuilder()
+        var n = 0
+        fun walk(node: AccessibilityNodeInfo?) {
+            if (node == null || n >= 150) return
+            val t = node.text?.toString() ?: ""
+            val d = node.contentDescription?.toString() ?: ""
+            if (t.isNotEmpty() || d.isNotEmpty() || node.isClickable) {
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (r.width() > 0 && r.height() > 0) {
+                    n++
+                    sb.append("- ")
+                    if (t.isNotEmpty()) sb.append("\"").append(t.take(60)).append("\" ")
+                    if (d.isNotEmpty()) sb.append("desc=\"").append(d.take(60)).append("\" ")
+                    if (node.isClickable) sb.append("[clickable] ")
+                    sb.append("at ").append(r.centerX()).append(",").append(r.centerY()).append("\n")
+                }
+            }
+            for (i in 0 until node.childCount) walk(node.getChild(i))
+        }
+        walk(root)
+        return if (n == 0) "(nothing readable - games usually draw everything as one image)" else sb.toString()
     }
 
     fun typeText(t: String): Boolean {
