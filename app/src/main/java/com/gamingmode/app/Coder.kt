@@ -172,6 +172,14 @@ Saved memory (standing instructions from the user):
                         GroqClient.chat(key, model, system + "\n" + AiMemory.asPrompt(ctx), prompt, emptyList(), 8000)
                     } catch (e: InterruptedException) {
                         throw e
+                    } catch (e: RateLimitException) {
+                        if (e.waitSec > 180) {
+                            hooks.status("Rate limit: try again in about ${e.waitSec / 60} min, or change the model in the gear settings.")
+                            break
+                        }
+                        hooks.status("Rate limit hit. Waiting ${e.waitSec}s…")
+                        Thread.sleep(e.waitSec * 1000L)
+                        continue
                     } catch (e: Exception) {
                         hooks.status("AI error: " + (e.message ?: "").take(150))
                         invalid++

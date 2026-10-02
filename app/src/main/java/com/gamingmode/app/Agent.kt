@@ -70,7 +70,7 @@ The user's saved memory below contains standing instructions you must follow.
         ui.post { hooks.overlays(false) }
         var bmp: Bitmap? = null
         try {
-            Thread.sleep(if (live) 150L else 350L)
+            Thread.sleep(if (live) 120L else 200L)
             val latch = CountDownLatch(1)
             ui.post {
                 svc.screenshot { b ->
@@ -154,14 +154,27 @@ The user's saved memory below contains standing instructions you must follow.
                         "\n\nTask: $task\nLast actions: $last\nWhat is the next action?"
                     val frames = if (twoFrames) listOf(old!!, img) else listOf(img)
                     prevImg = img
+                    var limitWait = -1L
                     val reply = try {
-                        GroqClient.chat(key, model, system, prompt, frames, 1500)
+                        GroqClient.chat(key, model, system, prompt, frames, 700)
                     } catch (e: InterruptedException) {
                         throw e
+                    } catch (e: RateLimitException) {
+                        limitWait = e.waitSec
+                        null
                     } catch (e: Exception) {
                         errors++
                         hooks.status("AI error: " + (e.message ?: "").take(150))
                         null
+                    }
+                    if (reply == null && limitWait >= 0) {
+                        if (limitWait > 180) {
+                            hooks.status("Rate limit: Groq says try again in about ${limitWait / 60} min. Switch the model in the gear settings, or wait.")
+                            break
+                        }
+                        hooks.status("Rate limit hit. Waiting ${limitWait}s, then I'll continue…")
+                        sleepSlices(limitWait * 1000L)
+                        continue
                     }
                     if (reply == null) {
                         if (errors >= 4) {

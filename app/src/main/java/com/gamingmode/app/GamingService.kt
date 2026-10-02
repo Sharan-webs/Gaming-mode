@@ -132,8 +132,7 @@ class GamingService : Service(), Agent.Hooks {
     }
 
     override fun overlays(visible: Boolean) {
-        val vis = if (visible) View.VISIBLE else View.INVISIBLE
-        for (v in overlayViews) v.visibility = vis
+        for (v in overlayViews) v.alpha = if (visible) 1f else 0f
     }
 
     // ---------- helpers ----------
