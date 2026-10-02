@@ -16,6 +16,7 @@ class Agent(private val ctx: Context, private val hooks: Hooks) {
     interface Hooks {
         fun status(t: String)
         fun overlays(visible: Boolean)
+        fun macroSaved(name: String) {}
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -32,21 +33,16 @@ class Agent(private val ctx: Context, private val hooks: Hooks) {
     private var shotH = 2400
 
     private val system = """
-You control an Android phone by looking at a screenshot and replying with ONE JSON object and nothing else.
-Coordinates x and y are integers from 0 to 1000 (0,0 = top-left, 1000,1000 = bottom-right of the screenshot).
-Allowed actions:
-{"action":"tap","x":500,"y":300,"why":"short reason"}
+You control an Android phone from a screenshot. Reply with ONE JSON object only.
+x,y are 0-1000 (0,0 = top-left). Actions:
+{"action":"tap","x":500,"y":300}
 {"action":"long_press","x":500,"y":300,"ms":800}
 {"action":"swipe","x1":500,"y1":800,"x2":500,"y2":300,"ms":400}
-{"action":"type","text":"text to type into the focused field"}
-{"action":"back"}  {"action":"home"}  {"action":"recents"}
+{"action":"type","text":"..."}  {"action":"back"}  {"action":"home"}  {"action":"recents"}
 {"action":"wait","seconds":5}
-{"action":"remember","text":"a standing instruction to keep for future sessions"}
-{"action":"answer","text":"reply to a question about the screen"}
-{"action":"done","text":"short summary when the task is finished"}
-Rules: For repeating tasks (for example "press reload every 5 seconds") tap, then use wait, and keep going - never use done until the user stops you.
-If the user says always / every time / remember, also use the remember action once.
-The user's saved memory below contains standing instructions you must follow.
+{"action":"save_macro","name":"jump x5","x":500,"y":800,"repeat":5,"gap_ms":150}  (find the button, save a reusable macro; or give "steps":[{"x":..,"y":..},...])
+{"action":"remember","text":"..."}  {"action":"answer","text":"..."}  {"action":"done","text":"..."}
+Repeating tasks: tap, wait, keep going; never use done until stopped. If the user says always / every time, also use remember once.
 """.trimIndent()
 
     fun stop() {
@@ -96,6 +92,14 @@ The user's saved memory below contains standing instructions you must follow.
     }
 
     private fun parse(s: String): JSONObject? {
+        val first = s.indexOf('{')
+        val lastB = s.lastIndexOf('}')
+        if (first >= 0 && lastB > first) {
+            try {
+                return JSONObject(s.substring(first, lastB + 1))
+            } catch (e: Exception) {
+            }
+        }
         val a = s.lastIndexOf('{')
         if (a < 0) return null
         val b = s.indexOf('}', a)
@@ -154,13 +158,12 @@ The user's saved memory below contains standing instructions you must follow.
                         "LIVE MODE: image 1 is the previous frame (about 1-2 seconds ago), image 2 is now. " +
                             "Work out how moving things travel and tap where the target will be when the tap lands. Act fast, avoid waiting.\n\n"
                     else ""
-                    val prompt = liveNote + "Saved memory:\n" + AiMemory.asPrompt(ctx) +
-                        "\n\nTask: $task\nLast actions: $last\nWhat is the next action?"
+                    val prompt = liveNote + AiMemory.asPrompt(ctx) + "Task: $task\nLast actions: $last\nNext action?"
                     val frames = if (twoFrames) listOf(old!!, img) else listOf(img)
                     prevImg = img
                     var limitWait = -1L
                     val reply = try {
-                        GroqClient.chat(key, models[mi], system, prompt, frames, 700)
+                        GroqClient.chat(key, models[mi], system + Persona.text(ctx), prompt, frames, 500)
                     } catch (e: InterruptedException) {
                         throw e
                     } catch (e: RateLimitException) {
@@ -275,6 +278,42 @@ The user's saved memory below contains standing instructions you must follow.
                             history.add("wait($s)")
                             hooks.status("Waiting ${s}s…")
                             sleepSlices(s * 1000L)
+                        }
+                        "save_macro" -> {
+                            val name = obj.optString("name", "").trim().ifEmpty { "AI macro " + (System.currentTimeMillis() % 1000) }
+                            val gap = obj.optLong("gap_ms", 150L).coerceIn(20L, 5000L)
+                            val pts = ArrayList<Pair<Float, Float>>()
+                            val steps = obj.optJSONArray("steps")
+                            if (steps != null) {
+                                for (i in 0 until steps.length()) {
+                                    val so = steps.optJSONObject(i) ?: continue
+                                    val sx = so.optDouble("x", -1.0)
+                                    val sy = so.optDouble("y", -1.0)
+                                    if (sx >= 0 && sy >= 0) pts.add(Pair((sx / 1000.0 * shotW).toFloat(), (sy / 1000.0 * shotH).toFloat()))
+                                }
+                            } else {
+                                val sx = obj.optDouble("x", -1.0)
+                                val sy = obj.optDouble("y", -1.0)
+                                val rep = obj.optInt("repeat", 1).coerceIn(1, 200)
+                                if (sx >= 0 && sy >= 0) {
+                                    for (i in 0 until rep) pts.add(Pair((sx / 1000.0 * shotW).toFloat(), (sy / 1000.0 * shotH).toFloat()))
+                                }
+                            }
+                            if (pts.isEmpty()) {
+                                hooks.status("The AI gave a bad macro, retrying…")
+                                sleepSlices(1500)
+                            } else {
+                                val strokes = ArrayList<Stroke>()
+                                var t = 0L
+                                for (p in pts) {
+                                    strokes.add(Stroke(t, 50L, listOf(p)))
+                                    t += 50L + gap
+                                }
+                                MacroStore.save(ctx, Macro(name, strokes))
+                                hooks.status("Saved macro '$name' (${strokes.size} taps). Its button is on screen.")
+                                hooks.macroSaved(name)
+                                break
+                            }
                         }
                         "remember" -> {
                             val t = obj.optString("text", "")

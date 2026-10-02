@@ -30,66 +30,18 @@ class Coder(private val ctx: Context, private val hooks: Agent.Hooks) {
     private val ui = Handler(Looper.getMainLooper())
 
     private val system = """
-You are a coding agent running inside an Android app. You work in steps; after each step you see the result.
-Reply with exactly ONE action in this plain-text format (no markdown fences, no extra text):
-
-ACTION: search
-QUERY: web search query
-
-ACTION: fetch
-URL: https://page-to-read
-
+You are an agent inside an Android app. Every reply is exactly ONE action: plain text, one field per line, no markdown.
+Example (write a file):
 ACTION: write
-ROOT: internal | shared | sdcard
-PATH: folder/file.ext
+ROOT: phone
+PATH: Download/test.txt
 CONTENT:
 <<<
-full file content here
+file text
 >>>
-
-ACTION: read
-ROOT: internal
-PATH: folder/file.ext
-
-ACTION: list
-ROOT: internal
-PATH: folder
-
-ACTION: screen
-(returns the visible text and buttons of the current app with their tap coordinates)
-
-ACTION: tap
-X: 540
-Y: 1200
-
-ACTION: swipe
-X1: 540
-Y1: 1500
-X2: 540
-Y2: 500
-
-ACTION: type
-TEXT: text to type into the focused field
-
-ACTION: key
-KEY: back | home | recents
-
-ACTION: wait
-SECONDS: 3
-
-ACTION: js
-CONTENT:
-<<<
-javascript code - use console.log or make the last expression the result
->>>
-
-ACTION: done
-TEXT: short summary of what you built and where the files are
-
-Rules: ROOT internal = app storage, shared = phone storage folder GamingModeAI, sdcard = SD card folder GamingModeAI (only if present).
-Paths are relative to the root. You can run JavaScript with the js action (your own console, sandboxed). Other languages cannot run here: write them as complete files. You can also control the phone: read the screen with screen, then tap / swipe / type / key.
-Build big things as several files. Search or fetch when you need up-to-date docs or examples.
-Saved memory (standing instructions from the user):
+Other actions use the same style: search (QUERY), fetch (URL), read / list (ROOT, PATH), screen (visible text + tap coordinates of the current app), tap (X, Y), swipe (X1, Y1, X2, Y2), type (TEXT), key (KEY: back|home|recents), wait (SECONDS), js (CONTENT block; sandboxed console, console.log or last expression is the result), done (TEXT: short summary).
+ROOT: internal = app storage, shared = GamingModeAI folder, sdcard = SD card GamingModeAI folder, phone = all phone storage, sdroot = whole SD card (Android blocks Android/data and Android/obb). Paths are relative to the root. Files outside your own folders are backed up as .bak before overwriting.
+Write complete working files. Only search or fetch when needed. Keep replies short.
 """.trimIndent()
 
     fun stop() {
@@ -101,10 +53,14 @@ Saved memory (standing instructions from the user):
         val m = LinkedHashMap<String, File>()
         m["internal"] = File(ctx.filesDir, "workspace")
         m["shared"] = File(Environment.getExternalStorageDirectory(), "GamingModeAI")
+        m["phone"] = Environment.getExternalStorageDirectory()
         val p = ctx.getExternalFilesDirs(null).getOrNull(1)?.absolutePath
         if (p != null) {
             val i = p.indexOf("/Android")
-            if (i > 0) m["sdcard"] = File(p.substring(0, i), "GamingModeAI")
+            if (i > 0) {
+                m["sdcard"] = File(p.substring(0, i), "GamingModeAI")
+                m["sdroot"] = File(p.substring(0, i))
+            }
         }
         return m
     }
@@ -233,12 +189,10 @@ Saved memory (standing instructions from the user):
             try {
                 while (running && step < 60) {
                     step++
-                    val roots = roots().keys.joinToString(", ")
-                    val prompt = "Available roots: $roots\n" + AiMemory.asPrompt(ctx) +
-                        "\n\nTask: $task\n\nWork log so far:\n" + log.takeLast(9000) + "\n\nNext action?"
+                    val prompt = AiMemory.asPrompt(ctx) + "Task: $task\n\nLog:\n" + log.takeLast(6000) + "\n\nNext action?"
                     hooks.status("Step $step: thinking…")
                     val reply = try {
-                        GroqClient.chat(key, model, system + "\n" + AiMemory.asPrompt(ctx), prompt, emptyList(), 8000)
+                        GroqClient.chat(key, model, system + Persona.text(ctx), prompt, emptyList(), 6000)
                     } catch (e: InterruptedException) {
                         throw e
                     } catch (e: RateLimitException) {
@@ -290,6 +244,10 @@ Saved memory (standing instructions from the user):
                                     result = "ERROR: missing CONTENT block with <<< and >>>"
                                 } else {
                                     file.parentFile?.mkdirs()
+                                    if ((root == "phone" || root == "sdroot") && file.exists()) {
+                                        val bak = File(file.path + ".bak")
+                                        if (!bak.exists()) file.copyTo(bak)
+                                    }
                                     file.writeText(body)
                                     hooks.status("📝 wrote $root/$path (${body.length} chars)")
                                     result = "OK wrote ${file.absolutePath}"

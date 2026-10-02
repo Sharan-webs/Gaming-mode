@@ -131,6 +131,13 @@ class GamingService : Service(), Agent.Hooks {
         }
     }
 
+    override fun macroSaved(name: String) {
+        main.post {
+            val m = MacroStore.all(this).firstOrNull { it.name == name }
+            if (m != null) addMacroButton(m)
+        }
+    }
+
     override fun overlays(visible: Boolean) {
         for (v in overlayViews) v.alpha = if (visible) 1f else 0f
     }
@@ -441,6 +448,9 @@ class GamingService : Service(), Agent.Hooks {
         form.addView(UI.text(this, "Coding model", 11f, UI.MUTED), UI.match(this, 8))
         val cm2 = UI.edit(this, GroqClient.DEFAULT_CODER, coderModel())
         form.addView(cm2, UI.match(this, 2))
+        form.addView(UI.text(this, "AI persona (optional) - how the AI talks", 11f, UI.MUTED), UI.match(this, 8))
+        val pe = UI.edit(this, "e.g. short, friendly gamer buddy", prefs.getString("persona", "") ?: "")
+        form.addView(pe, UI.match(this, 2))
 
         val go = UI.button(this, "🚀 Let's go", UI.ACCENT) {
             val key = k.text.toString().trim()
@@ -452,6 +462,7 @@ class GamingService : Service(), Agent.Hooks {
             if (key.isNotEmpty()) e.putString("groq_key", key)
             e.putString("m_vision", vm.text.toString().trim())
             e.putString("m_coder", cm2.text.toString().trim())
+            e.putString("persona", pe.text.toString().trim())
             e.apply()
             closePanel()
             startInjection()
@@ -608,7 +619,9 @@ class GamingService : Service(), Agent.Hooks {
     private fun showMacroMenu() {
         val c = card()
         c.addView(header("🎬 Screen record macro"))
-        c.addView(UI.button(this, "● Start record", UI.RED) { startRecording() }, UI.match(this, 10))
+        c.addView(UI.button(this, "● Quick record (no lag)", UI.RED) { startRecording(false) }, UI.match(this, 10))
+        c.addView(UI.text(this, "Tap where each action should happen, in order. Taps don't reach the game while recording.", 11f, UI.MUTED), UI.match(this, 2))
+        c.addView(UI.button(this, "● Live record (passes touches)") { startRecording(true) }, UI.match(this, 10))
         c.addView(UI.button(this, "📂 Recorded macros") { showMacroList() }, UI.match(this))
         showPanel(c)
     }
@@ -624,7 +637,7 @@ class GamingService : Service(), Agent.Hooks {
         }
     }
 
-    private fun startRecording() {
+    private fun startRecording(relay: Boolean) {
         val svc = GameAccessibilityService.instance
         if (svc == null) {
             toast("Turn on the accessibility permission first.")
@@ -660,11 +673,14 @@ class GamingService : Service(), Agent.Hooks {
                         val dur = max(40L, SystemClock.uptimeMillis() - downT)
                         val s = Stroke(downT - recStart, dur, ArrayList(path))
                         recStrokes.add(s)
-                        // pass the touch on to the game, then listen again
-                        setCaptureTouchable(false)
-                        val sv = GameAccessibilityService.instance
-                        if (sv == null) setCaptureTouchable(true)
-                        else sv.stroke(s.pts, s.durMs) { main.post { setCaptureTouchable(true) } }
+                        (recStop as? TextView)?.text = "■ STOP (${recStrokes.size})"
+                        if (relay) {
+                            // pass the touch on to the game, then listen again
+                            setCaptureTouchable(false)
+                            val sv = GameAccessibilityService.instance
+                            if (sv == null) setCaptureTouchable(true)
+                            else sv.stroke(s.pts, s.durMs) { main.post { setCaptureTouchable(true) } }
+                        }
                     }
                 }
             }
@@ -698,7 +714,7 @@ class GamingService : Service(), Agent.Hooks {
         addOv(stop, sp)
         recStop = stop
         notifyMacro("Macro recording started", "Do your actions, then press STOP.")
-        toast("Recording… do your actions, then press STOP.")
+        toast(if (relay) "Recording… do your actions, then press STOP." else "Quick record: tap where each action should happen, in order, then press STOP.")
     }
 
     private fun stopRecording() {

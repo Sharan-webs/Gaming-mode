@@ -102,6 +102,14 @@ object AiMemory {
 
     fun asPrompt(c: Context): String {
         val l = all(c)
-        return if (l.isEmpty()) "(nothing saved)" else l.joinToString("\n") { "- $it" }
+        return if (l.isEmpty()) "" else "Memory (standing instructions):\n" + l.joinToString("\n") { "- $it" } + "\n\n"
+    }
+}
+
+/** Optional style the user wants the AI to talk in. */
+object Persona {
+    fun text(c: Context): String {
+        val p = c.getSharedPreferences("gm", Context.MODE_PRIVATE).getString("persona", "")?.trim() ?: ""
+        return if (p.isEmpty()) "" else "\nStyle/persona for any text you write to the user: $p"
     }
 }
