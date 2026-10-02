@@ -422,24 +422,28 @@ class GamingService : Service(), Agent.Hooks {
         val c = card()
         c.addView(header("🤖 AI Corp"))
         val hasKey = groqKey().isNotBlank()
-        c.addView(
+
+        val form = LinearLayout(this)
+        form.orientation = LinearLayout.VERTICAL
+        form.addView(
             UI.text(this, if (hasKey) "A key is saved. Paste a new one to replace it, or leave empty." else "Paste your Groq API key (free at console.groq.com/keys)", 12f, UI.MUTED),
-            UI.match(this, 8)
+            UI.match(this, 4)
         )
         val k = UI.edit(this, "gsk_…")
-        c.addView(k, UI.match(this))
-        c.addView(UI.button(this, "📋 Paste from clipboard") {
+        form.addView(k, UI.match(this))
+        form.addView(UI.button(this, "📋 Paste from clipboard") {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             val t = cm.primaryClip?.getItemAt(0)?.text
             if (t != null) k.setText(t.toString().trim())
         }, UI.match(this))
-        c.addView(UI.text(this, "Vision model (sees the screen)", 11f, UI.MUTED), UI.match(this, 10))
+        form.addView(UI.text(this, "Vision model (sees the screen)", 11f, UI.MUTED), UI.match(this, 10))
         val vm = UI.edit(this, GroqClient.DEFAULT_VISION, visionModel())
-        c.addView(vm, UI.match(this, 2))
-        c.addView(UI.text(this, "Coding model", 11f, UI.MUTED), UI.match(this, 8))
+        form.addView(vm, UI.match(this, 2))
+        form.addView(UI.text(this, "Coding model", 11f, UI.MUTED), UI.match(this, 8))
         val cm2 = UI.edit(this, GroqClient.DEFAULT_CODER, coderModel())
-        c.addView(cm2, UI.match(this, 2))
-        c.addView(UI.button(this, "Save & start", UI.ACCENT) {
+        form.addView(cm2, UI.match(this, 2))
+
+        val go = UI.button(this, "🚀 Let's go", UI.ACCENT) {
             val key = k.text.toString().trim()
             if (key.isEmpty() && !hasKey) {
                 toast("Paste the key first")
@@ -452,7 +456,13 @@ class GamingService : Service(), Agent.Hooks {
             e.apply()
             closePanel()
             startInjection()
-        }, UI.match(this, 12))
+        }
+        // Let's go sits right under the title so it is always visible, even in landscape games.
+        c.addView(go, UI.match(this, 8))
+
+        val sv = ScrollView(this)
+        sv.addView(form)
+        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.45f).toInt()))
         showPanel(c, true)
     }
 
