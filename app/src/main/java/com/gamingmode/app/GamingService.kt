@@ -834,6 +834,15 @@ class GamingService : Service(), Agent.Hooks {
         form.addView(UI.text(this, "Coding model", 11f, UI.MUTED), UI.match(this, 8))
         val cm2 = UI.edit(this, GroqClient.DEFAULT_CODER, coderModel())
         form.addView(cm2, UI.match(this, 2))
+        form.addView(UI.text(this, "Persona (optional) - paste your own. Empty = the AI uses its own default. Max 2000 characters.", 11f, UI.MUTED), UI.match(this, 10))
+        val pe = UI.edit(this, "Paste your persona / instructions here", prefs.getString("persona", "") ?: "", true)
+        pe.maxLines = 6
+        form.addView(pe, UI.match(this, 4))
+        form.addView(UI.button(this, "📋 Paste persona from clipboard") {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val t = cm.primaryClip?.getItemAt(0)?.text
+            if (t != null) pe.setText(t.toString().trim())
+        }, UI.match(this, 4))
         form.addView(UI.text(this, "More AI (optional). Put a model in the lists above with a prefix:  g: Gemini   a: Claude   or: OpenRouter", 11f, UI.MUTED), UI.match(this, 10))
         val ork = UI.edit(this, "OpenRouter key", prefs.getString("or_key", "") ?: "")
         form.addView(ork, UI.match(this, 4))
@@ -852,6 +861,7 @@ class GamingService : Service(), Agent.Hooks {
             if (key.isNotEmpty()) e.putString("groq_key", key)
             e.putString("m_vision", vm.text.toString().trim())
             e.putString("m_coder", cm2.text.toString().trim())
+            e.putString("persona", pe.text.toString().trim())
             e.putString("or_key", ork.text.toString().trim())
             e.putString("g_key", gk.text.toString().trim())
             e.putString("a_key", ak.text.toString().trim())

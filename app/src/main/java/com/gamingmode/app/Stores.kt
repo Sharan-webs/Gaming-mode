@@ -109,6 +109,7 @@ object AiMemory {
 /** Optional style the user wants the AI to talk in. */
 object Persona {
     fun text(c: Context): String {
-        return ""
+        val p = c.getSharedPreferences("gm", Context.MODE_PRIVATE).getString("persona", "")?.trim() ?: ""
+        return if (p.isEmpty()) "" else "\nPersona / instructions from the user (follow them for how you talk and act):\n" + p.take(2000)
     }
 }
