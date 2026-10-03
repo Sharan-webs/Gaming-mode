@@ -368,7 +368,6 @@ class GamingService : Service(), Agent.Hooks {
         col.addView(UI.button(this, "🧩 My buttons") { showScriptList() }, UI.match(this))
         col.addView(UI.button(this, "🛡 Shizuku tools") { showShizuku() }, UI.match(this))
         col.addView(UI.button(this, "💻 Console") { showConsole() }, UI.match(this))
-        AimbotPanel.addMenuButton(col, this, wm, overlayViews, ::showPanel, ::closePanel)
         col.addView(UI.button(this, "📩 Contact admin") { contactAdmin() }, UI.match(this))
         val sv = ScrollView(this)
         sv.addView(col)

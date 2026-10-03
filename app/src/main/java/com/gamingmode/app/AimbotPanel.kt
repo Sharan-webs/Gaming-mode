@@ -1,366 +1,208 @@
 package com.gamingmode.app
 
 import android.content.Context
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.graphics.RectF
-import android.os.Handler
-import android.os.Looper
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
+import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
-import kotlin.math.abs
+import android.widget.Toast
 
-/**
- * AimbotPanel
- *
- * Adds a floating "🎯 Aimbot (FF Max)" button in the main menu.
- * When the panel opens:
- *   - A draggable crosshair overlay appears on screen.
- *   - "Head Only" toggle enables head-lock mode.
- *   - When aimbot is ON and the user presses the Shoot button on the
- *     panel, the accessibility service injects a tap at the crosshair
- *     centre (the "head" coordinate) directly into the game layer.
- *
- * No existing file is modified. GamingService calls:
- *   AimbotPanel.show(context, windowManager, overlayViews, ::closePanel)
- *   AimbotPanel.addMenuButton(col, context, ::showPanel, ::closePanel)
- */
-object AimbotPanel {
-
-    // ── State ──────────────────────────────────────────────────────────────
-
-    private var aimbotOn = false
-    private var headOnly = true          // always head — togglable in panel
-    private var crosshairView: CrosshairView? = null
-    private var crosshairLp: WindowManager.LayoutParams? = null
-    private var panelView: View? = null
-
-    private val main = Handler(Looper.getMainLooper())
-
-    // Crosshair position (screen coords, centre of target)
-    private var crossX = 0f
-    private var crossY = 0f
-
-    // ── Public API called from GamingService ───────────────────────────────
-
-    /**
-     * Adds the "🎯 Aimbot (FF Max)" row into the main menu column.
-     *
-     * @param col        the LinearLayout column inside showMenu()
-     * @param ctx        service context
-     * @param showPanel  GamingService.showPanel(view)
-     * @param closePanel GamingService.closePanel()
-     */
-    fun addMenuButton(
-        col: LinearLayout,
-        ctx: Context,
-        wm: WindowManager,
-        overlayViews: ArrayList<View>,
-        showPanel: (View) -> Unit,
-        closePanel: () -> Unit
-    ) {
-        col.addView(
-            UI.button(ctx, "🎯 Aimbot (FF Max)") {
-                show(ctx, wm, overlayViews, showPanel, closePanel)
-            },
-            UI.match(ctx)
+class AimbotPanel(
+    val context: Context,
+    val aimbot: AimbotModule,
+    val onClose: () -> Unit
+) {
+    
+    private lateinit var headOnlySwitch: Switch
+    private lateinit var autoTrackSwitch: Switch
+    private lateinit var statusText: TextView
+    private lateinit var shootButton: Button
+    
+    val view: LinearLayout by lazy { buildPanel() }
+    
+    private fun dp(v: Int) = UI.dp(context, v)
+    
+    private fun buildPanel(): LinearLayout {
+        val panel = LinearLayout(context)
+        panel.orientation = LinearLayout.VERTICAL
+        panel.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
         )
-    }
-
-    // ── Panel ──────────────────────────────────────────────────────────────
-
-    fun show(
-        ctx: Context,
-        wm: WindowManager,
-        overlayViews: ArrayList<View>,
-        showPanel: (View) -> Unit,
-        closePanel: () -> Unit
-    ) {
-        closePanel()
-
-        // Ensure crosshair is visible
-        ensureCrosshair(ctx, wm, overlayViews)
-
-        val c = buildCard(ctx, wm, overlayViews, showPanel, closePanel)
-        showPanel(c)
-        panelView = c
-    }
-
-    private fun buildCard(
-        ctx: Context,
-        wm: WindowManager,
-        overlayViews: ArrayList<View>,
-        showPanel: (View) -> Unit,
-        closePanel: () -> Unit
-    ): LinearLayout {
-        val dp = { v: Int -> UI.dp(ctx, v) }
-
-        val card = LinearLayout(ctx)
-        card.orientation = LinearLayout.VERTICAL
-        card.background = UI.bg(ctx, UI.BG, 18f)
-        card.setPadding(dp(16), dp(16), dp(16), dp(16))
-
-        // ── Header ────────────────────────────────────────────────────────
-        val head = LinearLayout(ctx)
-        head.orientation = LinearLayout.HORIZONTAL
-        head.gravity = Gravity.CENTER_VERTICAL
-        head.addView(
-            UI.text(ctx, "🎯 Aimbot — FF Max", 18f, Color.WHITE, true),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
-        head.addView(UI.button(ctx, "–") { closePanel() })
-        card.addView(head)
-
-        // ── Status label ──────────────────────────────────────────────────
-        val statusLabel = UI.text(ctx, statusText(), 13f, statusColor(), true)
-        card.addView(statusLabel, UI.match(ctx, 10))
-
-        // ── Head Only toggle ──────────────────────────────────────────────
-        val headBtn = UI.button(
-            ctx,
-            headLabel(),
-            if (headOnly) UI.GREEN else UI.CARD
-        ) {}
-        headBtn.setOnClickListener {
-            headOnly = !headOnly
-            headBtn.text = headLabel()
-            headBtn.background = UI.bg(ctx, if (headOnly) UI.GREEN else UI.CARD, 12f)
+        
+        val r = dp(16).toFloat()
+        val bg = GradientDrawable().apply {
+            setColor(0xFF1A1F2E.toInt())
+            cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
         }
-        card.addView(headBtn, UI.match(ctx, 8))
-
-        // ── Main ON/OFF toggle ────────────────────────────────────────────
-        val onOffBtn = UI.button(
-            ctx,
-            if (aimbotOn) "■ AIMBOT OFF" else "▶ AIMBOT ON",
-            if (aimbotOn) UI.RED else UI.ACCENT
-        ) {}
-        onOffBtn.setOnClickListener {
-            aimbotOn = !aimbotOn
-            onOffBtn.text = if (aimbotOn) "■ AIMBOT OFF" else "▶ AIMBOT ON"
-            onOffBtn.background = UI.bg(ctx, if (aimbotOn) UI.RED else UI.ACCENT, 12f)
-            statusLabel.text = statusText()
-            statusLabel.setTextColor(statusColor())
-            crosshairView?.setActive(aimbotOn)
-            if (!aimbotOn) {
-                crosshairView?.setLocked(false)
+        panel.background = bg
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16))
+        
+        // Header with title and close button
+        val header = LinearLayout(context)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
+        
+        val title = UI.text(context, "🔫 Aimbot FreeFire Max", 18f, Color.WHITE, true)
+        header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        
+        val closeBtn = UI.button(context, "✕", UI.RED) { 
+            panel.visibility = ViewGroup.GONE
+            onClose() 
+        }
+        closeBtn.layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        header.addView(closeBtn)
+        
+        panel.addView(header, UI.match(context, 0))
+        
+        // Status indicator
+        statusText = UI.text(context, "Status: Standby", 13f, UI.MUTED)
+        statusText.setPadding(0, dp(8), 0, dp(12))
+        panel.addView(statusText)
+        
+        // Head Only Toggle
+        val headRow = buildToggleRow(
+            label = "Head Only",
+            description = "Target head only, not body",
+            initialState = true,
+            onToggle = { state ->
+                aimbot.toggleHeadOnly(state)
+                updateStatus()
             }
-        }
-        card.addView(onOffBtn, UI.match(ctx, 8))
-
-        // ── Shoot button ──────────────────────────────────────────────────
-        val shootBtn = UI.button(ctx, "💥 SHOOT", 0xFF00C8FF.toInt()) {}
-        shootBtn.setOnClickListener {
-            if (!aimbotOn) return@setOnClickListener
-            injectShot(ctx)
-        }
-        card.addView(shootBtn, UI.match(ctx, 8))
-
-        // ── Crosshair position hint ───────────────────────────────────────
-        val hint = UI.text(
-            ctx,
-            "Drag the 🎯 crosshair on screen to the enemy head position.\n" +
-                "Press SHOOT — the tap is injected straight into the game.",
+        )
+        headOnlySwitch = headRow.second
+        panel.addView(headRow.first, UI.match(context, 8))
+        
+        // Auto Track Toggle
+        val trackRow = buildToggleRow(
+            label = "Auto Track",
+            description = "Automatically lock crosshair to head",
+            initialState = false,
+            onToggle = { state ->
+                aimbot.toggleAutoTrack(state)
+                updateStatus()
+            }
+        )
+        autoTrackSwitch = trackRow.second
+        panel.addView(trackRow.first, UI.match(context, 8))
+        
+        // Instructions
+        val instr = UI.text(
+            context,
+            "✓ Enable in accessibility settings\n" +
+            "✓ Press 'Detect Head' to start tracking\n" +
+            "✓ Aim will assist when enabled",
             11f,
             UI.MUTED
         )
-        hint.setPadding(0, dp(6), 0, 0)
-        card.addView(hint, UI.match(ctx, 6))
-
-        // ── Reset crosshair position ──────────────────────────────────────
-        card.addView(UI.button(ctx, "↺ Reset crosshair position") {
-            crosshairView?.let { cv ->
-                val lp = crosshairLp ?: return@let
-                val screen = ctx.resources.displayMetrics
-                lp.x = (screen.widthPixels / 2) - UI.dp(ctx, 28)
-                lp.y = (screen.heightPixels / 2) - UI.dp(ctx, 28)
-                crossX = screen.widthPixels / 2f
-                crossY = screen.heightPixels / 2f
-                try { wm.updateViewLayout(cv, lp) } catch (_: Exception) {}
-            }
-        }, UI.match(ctx, 8))
-
-        return card
+        instr.setPadding(0, dp(12), 0, dp(12))
+        panel.addView(instr)
+        
+        // Action buttons
+        val actionLayout = LinearLayout(context)
+        actionLayout.orientation = LinearLayout.HORIZONTAL
+        actionLayout.gravity = Gravity.CENTER
+        
+        val detectBtn = UI.button(context, "🔍 Detect Head", UI.ACCENT) {
+            startHeadDetection()
+        }
+        detectBtn.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f)
+        actionLayout.addView(detectBtn)
+        
+        val spacer = View(context)
+        spacer.layoutParams = LinearLayout.LayoutParams(dp(8), 0)
+        actionLayout.addView(spacer)
+        
+        shootButton = UI.button(context, "💥 Shoot", Color.parseColor("#FF4444")) {
+            simulateShoot()
+        }
+        shootButton.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f)
+        shootButton.alpha = 0.5f
+        actionLayout.addView(shootButton)
+        
+        panel.addView(actionLayout, UI.match(context, 8))
+        
+        return panel
     }
-
-    // ── Injection ──────────────────────────────────────────────────────────
-
-    /**
-     * Fires a tap at the crosshair centre via the accessibility service.
-     * This is the "injection" — the gesture is dispatched at system level,
-     * bypassing the game's own touch layer, effectively simulating the
-     * player tapping the fire button + aiming at the head coordinate.
-     */
-    private fun injectShot(ctx: Context) {
-        val svc = GameAccessibilityService.instance
-        if (svc == null) {
-            android.widget.Toast.makeText(
-                ctx,
-                "Accessibility service not connected. Enable it in permissions.",
-                android.widget.Toast.LENGTH_SHORT
-            ).show()
-            return
+    
+    private fun buildToggleRow(
+        label: String,
+        description: String,
+        initialState: Boolean,
+        onToggle: (Boolean) -> Unit
+    ): Pair<LinearLayout, Switch> {
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = UI.bg(context, UI.CARD, 10f)
+        row.setPadding(dp(12), dp(8), dp(12), dp(8))
+        
+        val textLayout = LinearLayout(context)
+        textLayout.orientation = LinearLayout.VERTICAL
+        textLayout.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        
+        val labelText = UI.text(context, label, 14f, Color.WHITE, true)
+        textLayout.addView(labelText)
+        
+        val descText = UI.text(context, description, 11f, UI.MUTED)
+        textLayout.addView(descText)
+        
+        row.addView(textLayout)
+        
+        val switch = Switch(context)
+        switch.isChecked = initialState
+        switch.setOnCheckedChangeListener { _, isChecked ->
+            onToggle(isChecked)
         }
-
-        if (!headOnly) {
-            // straight shot at crosshair centre
-            svc.tap(crossX, crossY)
-            return
-        }
-
-        // Head-only: tap the crosshair centre (user placed it on the head)
-        // then immediately tap again to confirm the shot within ~60 ms
-        svc.tap(crossX, crossY)
-        main.postDelayed({
-            GameAccessibilityService.instance?.tap(crossX, crossY)
-        }, 60L)
+        row.addView(switch)
+        
+        return Pair(row, switch)
     }
-
-    // ── Crosshair overlay ──────────────────────────────────────────────────
-
-    private fun ensureCrosshair(
-        ctx: Context,
-        wm: WindowManager,
-        overlayViews: ArrayList<View>
-    ) {
-        if (crosshairView != null) return
-
-        val size = UI.dp(ctx, 56)
-        val screen = ctx.resources.displayMetrics
-
-        val lp = WindowManager.LayoutParams(
-            size, size,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        )
-        lp.gravity = Gravity.TOP or Gravity.START
-        lp.x = screen.widthPixels / 2 - size / 2
-        lp.y = screen.heightPixels / 2 - size / 2
-        crossX = screen.widthPixels / 2f
-        crossY = screen.heightPixels / 2f
-
-        val cv = CrosshairView(ctx)
-        cv.setActive(aimbotOn)
-
-        // Drag logic — updates lp.x / lp.y and syncs crossX / crossY
-        var sx = 0; var sy = 0
-        var tx = 0f; var ty = 0f
-        var moved = false
-        cv.setOnTouchListener { _, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    sx = lp.x; sy = lp.y
-                    tx = e.rawX; ty = e.rawY
-                    moved = false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (e.rawX - tx).toInt()
-                    val dy = (e.rawY - ty).toInt()
-                    if (abs(dx) > 6 || abs(dy) > 6) moved = true
-                    if (moved) {
-                        lp.x = sx + dx
-                        lp.y = sy + dy
-                        crossX = lp.x + size / 2f
-                        crossY = lp.y + size / 2f
-                        try { wm.updateViewLayout(cv, lp) } catch (_: Exception) {}
-                    }
-                }
-            }
-            true
+    
+    private fun startHeadDetection() {
+        if (!autoTrackSwitch.isChecked) {
+            autoTrackSwitch.isChecked = true
         }
-
-        wm.addView(cv, lp)
-        overlayViews.add(cv)
-        crosshairView = cv
-        crosshairLp = lp
+        Toast.makeText(context, "Head detection started...", Toast.LENGTH_SHORT).show()
+        updateStatus()
     }
-
-    // ── Label helpers ──────────────────────────────────────────────────────
-
-    private fun headLabel() = if (headOnly) "🔴 Head Only: ON" else "⚪ Head Only: OFF"
-
-    private fun statusText() = if (aimbotOn) "AIMBOT ACTIVE — HEAD LOCKED" else "AIMBOT OFF"
-
-    private fun statusColor() = if (aimbotOn) UI.GREEN else UI.MUTED
-
-    // ── CrosshairView ──────────────────────────────────────────────────────
-
-    /**
-     * Custom view that draws a red/grey crosshair circle.
-     * Active = red. Inactive = dim grey.
-     */
-    class CrosshairView(ctx: Context) : View(ctx) {
-
-        private val paintRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 3.5f
-        }
-        private val paintCross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2f
-        }
-        private val paintDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-
-        private var active = false
-        private var locked = false
-
-        fun setActive(on: Boolean) {
-            active = on
-            invalidate()
-        }
-
-        fun setLocked(on: Boolean) {
-            locked = on
-            invalidate()
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val cx = width / 2f
-            val cy = height / 2f
-            val r = width / 2f - 4f
-            val arm = width * 0.28f
-            val gap = width * 0.10f
-
-            val ringColor = when {
-                locked -> Color.YELLOW
-                active -> Color.RED
-                else   -> 0xFF888888.toInt()
+    
+    private fun simulateShoot() {
+        if (autoTrackSwitch.isChecked) {
+            val config = aimbot.getConfig()
+            if (config.lockStrength > 0.5f) {
+                Toast.makeText(context, "🎯 Shot fired! Lock strength: ${(config.lockStrength * 100).toInt()}%", Toast.LENGTH_SHORT).show()
+                shootButton.alpha = 1f
+            } else {
+                Toast.makeText(context, "⚠️ Acquire target first", Toast.LENGTH_SHORT).show()
+                shootButton.alpha = 0.5f
             }
-            val crossColor = when {
-                active -> 0xFFFF4444.toInt()
-                else   -> 0xFF666666.toInt()
-            }
-            val dotColor = when {
-                active -> Color.RED
-                else   -> 0xFF555555.toInt()
-            }
-
-            paintRing.color = ringColor
-            paintCross.color = crossColor
-            paintDot.color = dotColor
-
-            // outer ring
-            canvas.drawOval(RectF(cx - r, cy - r, cx + r, cy + r), paintRing)
-
-            // crosshair arms (with centre gap)
-            canvas.drawLine(cx - arm, cy, cx - gap, cy, paintCross)   // left
-            canvas.drawLine(cx + gap, cy, cx + arm, cy, paintCross)   // right
-            canvas.drawLine(cx, cy - arm, cx, cy - gap, paintCross)   // top
-            canvas.drawLine(cx, cy + gap, cx, cy + arm, paintCross)   // bottom
-
-            // centre dot
-            canvas.drawCircle(cx, cy, 2.5f, paintDot)
+        } else {
+            Toast.makeText(context, "Enable Auto Track first", Toast.LENGTH_SHORT).show()
         }
+    }
+    
+    private fun updateStatus() {
+        val config = aimbot.getConfig()
+        val status = when {
+            config.autoTrack && config.headDetected -> 
+                "🔴 LOCKED | Head detected | Lock: ${(config.lockStrength * 100).toInt()}%"
+            config.autoTrack -> 
+                "🟡 TRACKING | Searching for target..."
+            else -> 
+                "⚪ STANDBY | ${if (config.headOnly) "Head Only" else "Body+Head"}"
+        }
+        statusText.text = status
+        
+        // Enable shoot button only when locked
+        shootButton.alpha = if (config.lockStrength > 0.5f) 1f else 0.4f
+    }
+    
+    fun updateTracking() {
+        updateStatus()
     }
 }

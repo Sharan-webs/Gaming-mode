@@ -41,6 +41,8 @@ class MainActivity : Activity() {
     private lateinit var mainStartBtn: Button
     private lateinit var sheetStartBtn: Button
     private lateinit var showIconBtn: Button
+    private lateinit var aimbotModule: AimbotModule
+    private var aimbotPanel: AimbotPanel? = null
     private var notifAsked = false
     private val shizukuListener = Shizuku.OnRequestPermissionResultListener { _, result ->
         if (result == PackageManager.PERMISSION_GRANTED) runOnUiThread { shizukuEnable() }
@@ -61,6 +63,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        aimbotModule = AimbotModule(this)
 
         perms = listOf(
             Perm(
@@ -146,6 +150,9 @@ class MainActivity : Activity() {
         val sub = UI.text(this, "AI-powered overlay, macros and screen control", 14f, UI.MUTED)
         sub.setPadding(0, dp(8), 0, dp(28))
         main.addView(sub)
+        
+        main.addView(UI.button(this, "📞 Contact", UI.ACCENT) { openAimbotPanel() }, UI.match(this, 6))
+        
         mainStatus = UI.text(this, "", 15f, Color.WHITE, true)
         main.addView(mainStatus)
         main.addView(UI.button(this, "Enable Gaming Mode", UI.ACCENT) { openSheet() }, UI.match(this, 18))
@@ -186,6 +193,15 @@ class MainActivity : Activity() {
         lp.topMargin = dp(90)
         rootFrame.addView(sheet, lp)
         sheet.translationY = resources.displayMetrics.heightPixels.toFloat()
+
+        aimbotPanel = AimbotPanel(this, aimbotModule) {
+            aimbotPanel?.view?.visibility = android.view.View.GONE
+        }
+        val aimbotLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        aimbotLp.topMargin = dp(90)
+        aimbotLp.gravity = Gravity.BOTTOM
+        aimbotPanel?.view?.visibility = android.view.View.GONE
+        rootFrame.addView(aimbotPanel?.view, aimbotLp)
 
         setContentView(rootFrame)
     }
@@ -321,5 +337,9 @@ class MainActivity : Activity() {
             b.alpha = if (running || requiredOk()) 1f else 0.5f
         }
         showIconBtn.alpha = if (running) 1f else 0.4f
+    }
+
+    private fun openAimbotPanel() {
+        aimbotPanel?.view?.visibility = android.view.View.VISIBLE
     }
 }
