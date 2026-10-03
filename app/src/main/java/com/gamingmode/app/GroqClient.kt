@@ -11,9 +11,11 @@ class RateLimitException(val waitSec: Long, message: String) : RuntimeException(
 object GroqClient {
     private const val GROQ = "https://api.groq.com/openai/v1/chat/completions"
     private const val OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
+    private const val GEMINI = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    private const val ANTHROPIC = "https://api.anthropic.com/v1/messages"
 
     // Comma separated lists: when one model hits its limit the app switches to the next one and carries on.
-    // A model written as  or:name  runs on OpenRouter (needs the OpenRouter key from the settings).
+    // Prefixes choose the provider:  (none) = Groq   g: = Gemini   a: = Claude   or: = OpenRouter
     const val DEFAULT_VISION = "qwen/qwen3.8-27b, qwen/qwen3.6-27b"
     const val DEFAULT_CODER = "openai/gpt-oss-120b, openai/gpt-oss-20b, llama-3.3-70b-versatile"
 
@@ -21,14 +23,14 @@ object GroqClient {
 
     private class Resp(val code: Int, val text: String, val retryAfter: Double?)
 
-    private fun post(endpoint: String, key: String, body: JSONObject): Resp {
+    private fun post(endpoint: String, headers: Map<String, String>, body: JSONObject): Resp {
         val conn = URL(endpoint).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 20000
         conn.readTimeout = 120000
         conn.doOutput = true
-        conn.setRequestProperty("Authorization", "Bearer " + key.trim())
         conn.setRequestProperty("Content-Type", "application/json")
+        for ((k, v) in headers) conn.setRequestProperty(k, v)
         conn.outputStream.use { it.write(body.toString().toByteArray()) }
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -48,6 +50,39 @@ object GroqClient {
         return 20L
     }
 
+    private fun b64(j: ByteArray) = Base64.encodeToString(j, Base64.NO_WRAP)
+
+    private fun claude(key: String, model: String, system: String, user: String, jpegs: List<ByteArray>, maxTokens: Int): String {
+        val content = JSONArray()
+        for (j in jpegs) {
+            content.put(
+                JSONObject().put("type", "image").put(
+                    "source",
+                    JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", b64(j))
+                )
+            )
+        }
+        content.put(JSONObject().put("type", "text").put("text", user))
+        val body = JSONObject()
+            .put("model", model)
+            .put("max_tokens", maxTokens)
+            .put("system", system)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+        val r = post(ANTHROPIC, mapOf("x-api-key" to key.trim(), "anthropic-version" to "2023-06-01"), body)
+        if (r.code == 429) {
+            val w = waitSeconds(r)
+            throw RateLimitException(w, "Rate limit reached for 'a:$model'. Try again in ${w}s.")
+        }
+        if (r.code !in 200..299) throw RuntimeException("HTTP ${r.code}: " + r.text.take(220))
+        val arr = JSONObject(r.text).getJSONArray("content")
+        val sb = StringBuilder()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("type") == "text") sb.append(o.optString("text"))
+        }
+        return clean(sb.toString())
+    }
+
     fun chat(
         key: String,
         model: String,
@@ -56,19 +91,32 @@ object GroqClient {
         jpegs: List<ByteArray>,
         maxTokens: Int = 1500
     ): String {
-        val orMode = model.startsWith("or:")
-        val realModel = if (orMode) model.removePrefix("or:") else model
-        val endpoint = if (orMode) OPENROUTER else GROQ
-        val authKey = if (orMode) Keys.openrouter else key
-        if (authKey.isBlank()) throw RuntimeException(if (orMode) "Add your OpenRouter key in the gear settings." else "Missing Groq key.")
+        val prov = when {
+            model.startsWith("or:") -> "or"
+            model.startsWith("g:") -> "g"
+            model.startsWith("a:") -> "a"
+            else -> "groq"
+        }
+        val realModel = if (prov == "groq") model else model.substring(2)
+        val authKey = when (prov) {
+            "or" -> Keys.openrouter
+            "g" -> Keys.gemini
+            "a" -> Keys.anthropic
+            else -> key
+        }
+        if (authKey.isBlank()) {
+            val who = when (prov) { "or" -> "OpenRouter"; "g" -> "Gemini"; "a" -> "Claude"; else -> "Groq" }
+            throw RuntimeException("Add your $who key in the gear settings.")
+        }
+        if (prov == "a") return claude(authKey, realModel, system, user, jpegs, maxTokens)
 
+        val endpoint = when (prov) { "or" -> OPENROUTER; "g" -> GEMINI; else -> GROQ }
         val content = JSONArray()
         content.put(JSONObject().put("type", "text").put("text", user))
         for (jpeg in jpegs) {
-            val url = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
             content.put(
                 JSONObject().put("type", "image_url")
-                    .put("image_url", JSONObject().put("url", url))
+                    .put("image_url", JSONObject().put("url", "data:image/jpeg;base64," + b64(jpeg)))
             )
         }
         val msgs = JSONArray()
@@ -77,7 +125,7 @@ object GroqClient {
 
         // Thinking burns lots of tokens and hits rate limits fast, so ask for as little as possible.
         val effort: String? = when {
-            orMode -> null
+            prov != "groq" -> null
             realModel.startsWith("openai/gpt-oss") -> "low"
             realModel.startsWith("qwen/") -> "none"
             else -> null
@@ -93,9 +141,10 @@ object GroqClient {
             return b
         }
 
-        var r = post(endpoint, authKey, body(effort))
+        val headers = mapOf("Authorization" to "Bearer " + authKey.trim())
+        var r = post(endpoint, headers, body(effort))
         if (r.code == 400 && effort != null && r.text.contains("reason", ignoreCase = true)) {
-            r = post(endpoint, authKey, body(null))
+            r = post(endpoint, headers, body(null))
         }
         if (r.code == 429) {
             val w = waitSeconds(r)

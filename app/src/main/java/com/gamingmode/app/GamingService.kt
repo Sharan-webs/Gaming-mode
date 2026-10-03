@@ -1,5 +1,7 @@
 package com.gamingmode.app
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -60,6 +62,14 @@ class GamingService : Service(), Agent.Hooks {
     private var statusTv: TextView? = null
     private var statusScroll: ScrollView? = null
     private var codeMode = false
+    private var chatCol: LinearLayout? = null
+    private var chatScroll: ScrollView? = null
+    private var liveTv: TextView? = null
+    private var liveAnim: ObjectAnimator? = null
+    private var featStatus: TextView? = null
+    private val feed = ArrayList<String>()
+    private var consoleProc: Process? = null
+    private var liveView: LiveView? = null
 
     private val macroButtons = HashMap<String, View>()
     private val scriptButtons = HashMap<String, View>()
@@ -87,6 +97,8 @@ class GamingService : Service(), Agent.Hooks {
         coder = Coder(this, this)
         createChannels()
         Keys.openrouter = prefs.getString("or_key", "") ?: ""
+        Keys.gemini = prefs.getString("g_key", "") ?: ""
+        Keys.anthropic = prefs.getString("a_key", "") ?: ""
         Master.enableAccessibility(this)
         Thread { if (Shell.ready()) Shell.grantSelf(this) }.start()
         val showPi = PendingIntent.getService(
@@ -110,6 +122,7 @@ class GamingService : Service(), Agent.Hooks {
         agent.stop()
         coder.stop()
         for (r in runners.values) r.stop()
+        liveView?.stop()
         for (v in ArrayList(overlayViews)) {
             try {
                 wm.removeView(v)
@@ -126,26 +139,71 @@ class GamingService : Service(), Agent.Hooks {
 
     override fun status(t: String) {
         main.post {
-            val tv = statusTv ?: return@post
-            if (codeMode) {
-                val s = tv.text.toString() + "\n" + t
-                tv.text = if (s.length > 6000) s.takeLast(6000) else s
-                statusScroll?.post { statusScroll?.fullScroll(View.FOCUS_DOWN) }
+            feed.add(t)
+            if (feed.size > 300) feed.removeAt(0)
+            val terminal = listOf("Done", "✅", "AI:", "Stopped", "Can't", "The accessibility", "All models", "Rate limit:", "Saved", "🧩")
+            val isTerm = terminal.any { t.startsWith(it) }
+            if (isTerm) {
+                val clean = t.removePrefix("Done:").removePrefix("✅").removePrefix("AI:").trim()
+                bubble(if (clean.isEmpty()) "Done." else clean, false)
+                live("")
+                featStatus?.text = clean
             } else {
-                tv.text = t
+                live(t)
+                featStatus?.text = "● $t"
             }
         }
     }
 
+    private fun bubble(text: String, mine: Boolean) {
+        val col = chatCol ?: return
+        val tv = UI.text(this, text, 13f, Color.WHITE)
+        tv.background = UI.bg(this, if (mine) UI.ACCENT else UI.CARD, 14f)
+        tv.setPadding(dp(12), dp(8), dp(12), dp(8))
+        val lp2 = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp2.gravity = if (mine) Gravity.END else Gravity.START
+        lp2.topMargin = dp(6)
+        if (mine) lp2.marginStart = dp(40) else lp2.marginEnd = dp(40)
+        if (col.childCount > 30) col.removeViewAt(0)
+        tv.alpha = 0f
+        tv.translationY = dp(8).toFloat()
+        col.addView(tv, lp2)
+        tv.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun live(text: String) {
+        val tv = liveTv ?: return
+        liveAnim?.cancel()
+        if (text.isEmpty()) {
+            tv.text = ""
+            tv.alpha = 1f
+            return
+        }
+        tv.text = "● $text"
+        val an = ObjectAnimator.ofFloat(tv, "alpha", 0.35f, 1f)
+        an.duration = 700
+        an.repeatMode = ValueAnimator.REVERSE
+        an.repeatCount = ValueAnimator.INFINITE
+        an.start()
+        liveAnim = an
+    }
+
     override fun addButton(label: String, script: String) {
         ScriptStore.save(this, Script(label, script))
-        main.post { addScriptButton(Script(label, script)) }
+        main.post {
+            addScriptButton(Script(label, script))
+            if (featStatus != null) showFeatures()
+        }
     }
 
     override fun addMenu(title: String, items: String) {
         val s = Script(title, "#menu\n" + items)
         ScriptStore.save(this, s)
-        main.post { addScriptButton(s) }
+        main.post {
+            addScriptButton(s)
+            if (featStatus != null) showFeatures()
+        }
     }
 
     private fun showScriptMenu(s: Script) {
@@ -179,6 +237,7 @@ class GamingService : Service(), Agent.Hooks {
 
     override fun overlays(visible: Boolean) {
         for (v in overlayViews) v.alpha = if (visible) 1f else 0f
+        liveView?.setAlpha(if (visible) 1f else 0f)
     }
 
     // ---------- helpers ----------
@@ -230,7 +289,7 @@ class GamingService : Service(), Agent.Hooks {
     private fun card(pad: Int = 16): LinearLayout {
         val c = LinearLayout(this)
         c.orientation = LinearLayout.VERTICAL
-        c.background = UI.bg(this, UI.BG, 18f)
+        c.background = UI.panel(this)
         c.setPadding(dp(pad), dp(pad), dp(pad), dp(pad))
         return c
     }
@@ -258,14 +317,19 @@ class GamingService : Service(), Agent.Hooks {
         }
         addOv(content, p)
         panel = content
+        content.alpha = 0f
+        content.scaleX = 0.94f
+        content.scaleY = 0.94f
+        content.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(170).start()
     }
 
     private fun closePanel() {
+        featStatus = null
         panel?.let { remOv(it) }
         panel = null
     }
 
-    private fun drag(v: View, p: WindowManager.LayoutParams, onClick: () -> Unit, onLong: (() -> Unit)?) {
+    private fun drag(v: View, p: WindowManager.LayoutParams, onClick: () -> Unit, onLong: (() -> Unit)?, snap: Boolean = false) {
         var sx = 0
         var sy = 0
         var tx = 0f
@@ -281,6 +345,7 @@ class GamingService : Service(), Agent.Hooks {
                     ty = e.rawY
                     moved = false
                     downT = SystemClock.uptimeMillis()
+                    v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).start()
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (e.rawX - tx).toInt()
@@ -295,9 +360,25 @@ class GamingService : Service(), Agent.Hooks {
                         }
                     }
                 }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) {
-                        if (onLong != null && SystemClock.uptimeMillis() - downT > 600) onLong() else onClick()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                    if (e.actionMasked == MotionEvent.ACTION_UP) {
+                        if (!moved) {
+                            if (onLong != null && SystemClock.uptimeMillis() - downT > 600) onLong() else onClick()
+                        } else if (snap) {
+                            val sw = resources.displayMetrics.widthPixels
+                            val target = if (p.x + v.width / 2 < sw / 2) 0 else sw - v.width
+                            val an = ValueAnimator.ofInt(p.x, target)
+                            an.duration = 200
+                            an.addUpdateListener {
+                                p.x = it.animatedValue as Int
+                                try {
+                                    wm.updateViewLayout(v, p)
+                                } catch (ex: Exception) {
+                                }
+                            }
+                            an.start()
+                        }
                     }
                 }
             }
@@ -317,7 +398,7 @@ class GamingService : Service(), Agent.Hooks {
         val p = lp(s, s)
         p.x = 0
         p.y = dp(200)
-        drag(v, p, { if (panel != null) closePanel() else showMenu() }, null)
+        drag(v, p, { if (panel != null) closePanel() else showMenu() }, null, true)
         addOv(v, p)
         icon = v
         iconLp = p
@@ -355,20 +436,18 @@ class GamingService : Service(), Agent.Hooks {
         c.addView(header("🎮 Gaming Mode"))
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        col.addView(UI.button(this, "📺 DPI changer") { showDpi() }, UI.match(this, 8))
         val sens = UI.button(this, sensLabel()) {}
-        sens.setOnClickListener {
-            toggleSens()
-            sens.text = sensLabel()
-        }
-        col.addView(sens, UI.match(this))
+        sens.setOnClickListener { toggleSens { sens.text = sensLabel() } }
+        col.addView(sens, UI.match(this, 8))
         col.addView(UI.button(this, "🤖 AI Corp") { openAiCorp() }, UI.match(this))
+        col.addView(UI.button(this, "📺 Live view") { toggleLive() }, UI.match(this))
+        col.addView(UI.button(this, "👁 Detect screen") { detectScreen() }, UI.match(this))
         col.addView(UI.button(this, "🎬 Screen record macro") { showMacroMenu() }, UI.match(this))
         col.addView(UI.button(this, "🧠 AI memory") { showMemory() }, UI.match(this))
-        col.addView(UI.button(this, "🧩 My buttons") { showScriptList() }, UI.match(this))
-        col.addView(UI.button(this, "🛡 Shizuku tools") { showShizuku() }, UI.match(this))
         col.addView(UI.button(this, "💻 Console") { showConsole() }, UI.match(this))
-        AimbotFF.addMenuButton(col, this, ::showPanel, ::closePanel)
+        col.addView(UI.button(this, "🛡 Shizuku tools") { showShizuku() }, UI.match(this))
+        col.addView(UI.button(this, "🧪 Touch test") { touchTest() }, UI.match(this))
+        col.addView(UI.button(this, "✨ Features") { showFeatures() }, UI.match(this))
         col.addView(UI.button(this, "📩 Contact admin") { contactAdmin() }, UI.match(this))
         val sv = ScrollView(this)
         sv.addView(col)
@@ -378,10 +457,8 @@ class GamingService : Service(), Agent.Hooks {
 
     // ---------- Shizuku tools ----------
 
-    private val dpiValues = listOf(240, 280, 320, 360, 400, 440, 480, 520, 560, 600)
-
     private fun shellTapLabel() =
-        if (prefs.getBoolean("shell_input", false)) "👆 Shizuku taps: ON (work while you touch)" else "👆 Shizuku taps: OFF"
+        if (prefs.getBoolean("shell_input", true)) "👆 Shizuku taps: ON" else "👆 Shizuku taps: OFF"
 
     private fun showShizuku() {
         val c = card()
@@ -396,56 +473,63 @@ class GamingService : Service(), Agent.Hooks {
         }, UI.match(this, 10))
         val tapBtn = UI.button(this, shellTapLabel()) {}
         tapBtn.setOnClickListener {
-            prefs.edit().putBoolean("shell_input", !prefs.getBoolean("shell_input", false)).apply()
+            prefs.edit().putBoolean("shell_input", !prefs.getBoolean("shell_input", true)).apply()
             tapBtn.text = shellTapLabel()
         }
         c.addView(tapBtn, UI.match(this))
-        c.addView(UI.button(this, "📺 DPI changer") { showDpi() }, UI.match(this))
         c.addView(UI.button(this, "💻 Console") { showConsole() }, UI.match(this))
         showPanel(c)
     }
 
-    private fun showDpi() {
+    private fun showTextPanel(title: String, text: String) {
         val c = card()
-        c.addView(header("📺 DPI changer"))
-        if (!Shell.ready()) {
-            c.addView(UI.text(this, "Needs Shizuku. Start it, allow this app, then open this again.", 12f, UI.RED), UI.match(this, 10))
-            showPanel(c)
+        c.addView(header(title))
+        val tv = UI.text(this, text, 12f, Color.WHITE)
+        val sv = ScrollView(this)
+        sv.addView(tv)
+        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)))
+        showPanel(c)
+    }
+
+    private fun toggleLive() {
+        closePanel()
+        val lv = liveView
+        if (lv != null) {
+            lv.stop()
+            liveView = null
             return
         }
-        val active = prefs.getInt("dpi_on", 0)
-        c.addView(UI.text(this, "Real density values. Only one can be on; tap it again to reset.", 11f, UI.MUTED), UI.match(this, 6))
-        val list = LinearLayout(this)
-        list.orientation = LinearLayout.VERTICAL
-        for (v in dpiValues) {
-            if (active != 0 && active != v) continue
-            val on = active == v
-            list.addView(UI.button(this, if (on) "ON  $v  - tap to reset" else "$v", if (on) UI.GREEN else UI.CARD) {
-                Thread {
-                    if (on) {
-                        Shell.run("wm density reset")
-                        prefs.edit().putInt("dpi_on", 0).apply()
-                    } else {
-                        Shell.run("wm density $v")
-                        prefs.edit().putInt("dpi_on", v).apply()
-                    }
-                    main.post { showDpi() }
-                }.start()
-            }, UI.match(this, 6))
+        if (GameAccessibilityService.instance == null) {
+            toast("Turn the accessibility service on first. It takes the screenshots for the live view.")
+            return
         }
-        val sv = ScrollView(this)
-        sv.addView(list)
-        c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (active == 0) dp(230) else ViewGroup.LayoutParams.WRAP_CONTENT))
-        showPanel(c)
+        val v = LiveView(this, wm, { groqKey() }, { visionModel() }, { toast(it) }, { liveView = null })
+        liveView = v
+        v.start()
+    }
+
+    private fun detectScreen() {
+        closePanel()
+        toast("Looking at the screen…")
+        agent.describe(groqKey(), visionModel()) { result, err ->
+            showTextPanel("👁 Screen detection", result ?: ("Couldn't detect: " + err))
+        }
     }
 
     private fun showConsole() {
         val c = card()
-        c.addView(header("💻 Console (Shizuku shell)"))
-        val out = UI.text(this, "Type a command, for example:  ls /sdcard/Android/data", 12f, UI.MUTED)
+        c.addView(header("💻 Console (live)"))
+        val out = UI.text(this, "Live shell output appears here. Try:  ls /sdcard/Android/data", 12f, UI.MUTED)
+        out.typeface = Typeface.MONOSPACE
         val sc = ScrollView(this)
         sc.addView(out)
         c.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        fun append(t: String) {
+            main.post {
+                out.text = (out.text.toString() + t).takeLast(8000)
+                sc.post { sc.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
         val et = UI.edit(this, "command…")
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
@@ -454,40 +538,199 @@ class GamingService : Service(), Agent.Hooks {
         row.addView(UI.button(this, "Run", UI.ACCENT) {
             val cmd = et.text.toString().trim()
             if (cmd.isNotEmpty()) {
-                out.text = out.text.toString() + "\n$ " + cmd
+                consoleProc?.destroy()
+                append("\n$ " + cmd + "\n")
                 et.setText("")
-                Thread {
-                    val r = Shell.run(cmd)
-                    main.post {
-                        out.text = (out.text.toString() + "\n" + r).takeLast(6000)
-                        sc.post { sc.fullScroll(View.FOCUS_DOWN) }
-                    }
-                }.start()
+                Thread { consoleProc = Shell.stream(cmd) { append(it) } }.start()
             }
         })
+        row.addView(UI.button(this, "■", UI.RED) {
+            consoleProc?.destroy()
+            append("\n[stopped]\n")
+        })
         c.addView(row, UI.match(this, 8))
+        val row2 = LinearLayout(this)
+        row2.orientation = LinearLayout.HORIZONTAL
+        row2.addView(UI.button(this, "📡 AI feed") {
+            out.text = if (feed.isEmpty()) "(no AI activity yet)" else feed.takeLast(80).joinToString("\n")
+            sc.post { sc.fullScroll(View.FOCUS_DOWN) }
+        })
+        row2.addView(UI.button(this, "Clear") { out.text = "" })
+        c.addView(row2, UI.match(this, 6))
         showPanel(c, true)
     }
 
-    private fun sensLabel() =
-        if (prefs.getBoolean("sens", false)) "⚡ Sensitivity booster: ON" else "⚡ Sensitivity booster: OFF"
+    private fun touchTest() {
+        closePanel()
+        val svc = GameAccessibilityService.instance
+        val size = dp(90)
+        val dot = TextView(this)
+        dot.text = "TAP"
+        dot.textSize = 16f
+        dot.setTextColor(Color.WHITE)
+        dot.gravity = Gravity.CENTER
+        dot.typeface = Typeface.DEFAULT_BOLD
+        dot.background = UI.oval(UI.GREEN)
+        val p = lp(size, size)
+        p.gravity = Gravity.CENTER
+        var hits = 0
+        dot.setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) hits++
+            true
+        }
+        addOv(dot, p)
+        toast("Touch test running…")
+        dot.postDelayed({
+            val loc = IntArray(2)
+            dot.getLocationOnScreen(loc)
+            val cx = loc[0] + size / 2f
+            val cy = loc[1] + size / 2f
+            Thread {
+                val rep = StringBuilder()
+                if (svc == null) {
+                    rep.append("Accessibility: not connected ✗\n")
+                } else {
+                    hits = 0
+                    var accepted = false
+                    main.post { accepted = svc.tapChecked(cx, cy) }
+                    Thread.sleep(900)
+                    rep.append("Accessibility tap: ")
+                        .append(if (hits > 0) "works ✓" else if (accepted) "sent, but the screen ignored it ✗" else "refused by Android ✗")
+                        .append("\n")
+                }
+                if (Shell.ready()) {
+                    hits = 0
+                    Shell.run("input tap " + cx.toInt() + " " + cy.toInt())
+                    Thread.sleep(500)
+                    rep.append("Shizuku tap: ").append(if (hits > 0) "works ✓" else "not received ✗")
+                } else {
+                    rep.append("Shizuku: not connected")
+                }
+                main.post {
+                    remOv(dot)
+                    showTextPanel(
+                        "🧪 Touch test",
+                        rep.toString() + "\n\nA ✓ means that method can tap in normal apps. If a test passes but a game still ignores taps, that game blocks injected touches."
+                    )
+                }
+            }.start()
+        }, 400)
+    }
 
-    private fun toggleSens() {
-        if (!Settings.System.canWrite(this)) {
-            toast("Enable the 'Modify system settings' permission for this app first.")
-            return
-        }
-        val on = !prefs.getBoolean("sens", false)
-        try {
-            Settings.System.putInt(contentResolver, "pointer_speed", if (on) 7 else 0)
-            prefs.edit().putBoolean("sens", on).apply()
-            toast(
-                if (on) "Pointer speed set to maximum. This affects the mouse/gamepad pointer, not in-game touch sensitivity."
-                else "Pointer speed reset."
+    // ---------- Features: ask the AI, get a working button or menu ----------
+
+    private fun showFeatures() {
+        val c = card()
+        c.addView(header("✨ Features"))
+        c.addView(UI.text(this, "Describe a feature. The AI builds it as a floating button or menu that really works.", 11f, UI.MUTED), UI.match(this, 6))
+        val et = UI.edit(this, "e.g. a button that taps my reload spot every 5 seconds", "", true)
+        c.addView(et, UI.match(this, 6))
+        val st = UI.text(this, "", 11f, UI.MUTED)
+        c.addView(UI.button(this, "✨ Create", UI.ACCENT) {
+            val t = et.text.toString().trim()
+            if (t.isEmpty()) {
+                toast("Describe the feature first")
+                return@button
+            }
+            if (coder.running) {
+                toast("Already building one. Wait, or press Stop in the AI box.")
+                return@button
+            }
+            st.text = "● building…"
+            coder.run(
+                groqKey(), coderModel(),
+                "Build this as a floating button or menu using the button or menu action, with a script that really works. Request: $t"
             )
-        } catch (e: Exception) {
-            toast("Couldn't change the setting: " + e.message)
+        }, UI.match(this, 8))
+        c.addView(st, UI.match(this, 4))
+        val list = ScriptStore.all(this)
+        if (list.isNotEmpty()) {
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            for (s in list) {
+                val row = LinearLayout(this)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.addView(UI.text(this, s.name, 14f, Color.WHITE, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(UI.button(this, if (s.body.startsWith("#menu")) "Open" else "Run", UI.ACCENT) {
+                    if (s.body.startsWith("#menu")) {
+                        showScriptMenu(s)
+                    } else {
+                        closePanel()
+                        val r = runners.getOrPut(s.name) { ScriptRunner(this) }
+                        if (r.running) r.stop() else r.start(s.body) {}
+                    }
+                })
+                row.addView(UI.button(this, "Show") {
+                    closePanel()
+                    addScriptButton(s)
+                })
+                row.addView(UI.button(this, "✕", UI.RED) {
+                    ScriptStore.delete(this, s.name)
+                    scriptButtons.remove(s.name)?.let { remOv(it) }
+                    showFeatures()
+                })
+                col.addView(row, UI.match(this, 6))
+            }
+            val sv = ScrollView(this)
+            sv.addView(col)
+            c.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (list.size > 3) dp(180) else ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        showPanel(c, true)
+        featStatus = st
+    }
+
+    // ---------- Touch response boost ----------
+
+    private fun sensLabel() =
+        if (prefs.getBoolean("sens", false)) "⚡ Touch response boost: ON" else "⚡ Touch response boost: OFF"
+
+    private fun ensureWriteSettings(): Boolean {
+        if (Settings.System.canWrite(this)) return true
+        if (Shell.ready()) {
+            Shell.run("appops set $packageName WRITE_SETTINGS allow")
+            if (Settings.System.canWrite(this)) return true
+        }
+        return false
+    }
+
+    private fun toggleSens(onDone: () -> Unit) {
+        Thread {
+            if (!ensureWriteSettings()) {
+                main.post {
+                    toast("Android needs your OK once: switch on 'Allow modifying system settings' for Gaming Mode, then press this again.")
+                    try {
+                        startActivity(
+                            Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    } catch (e: Exception) {
+                    }
+                }
+                return@Thread
+            }
+            val on = !prefs.getBoolean("sens", false)
+            val ok = ArrayList<String>()
+            val fail = ArrayList<String>()
+            fun set(ns: String, key: String, v: String) {
+                if (PhoneCtl.setSetting(this, ns, key, v).startsWith("OK")) ok.add(key) else fail.add(key)
+            }
+            set("system", "pointer_speed", if (on) "7" else "0")
+            set("secure", "long_press_timeout", if (on) "250" else "400")
+            set("secure", "multi_press_timeout", if (on) "250" else "300")
+            set("global", "window_animation_scale", if (on) "0.5" else "1.0")
+            set("global", "transition_animation_scale", if (on) "0.5" else "1.0")
+            set("global", "animator_duration_scale", if (on) "0.5" else "1.0")
+            prefs.edit().putBoolean("sens", on).apply()
+            main.post {
+                toast(
+                    (if (on) "Touch response boost ON" else "Touch response boost OFF") +
+                        " (" + ok.size + " settings changed" + (if (fail.isNotEmpty()) ", " + fail.size + " need Master access" else "") + "). " +
+                        "Faster long-press, animations and pointer. In-game sensitivity is only inside the game's own settings."
+                )
+                onDone()
+            }
+        }.start()
     }
 
     private fun contactAdmin() {
@@ -591,12 +834,13 @@ class GamingService : Service(), Agent.Hooks {
         form.addView(UI.text(this, "Coding model", 11f, UI.MUTED), UI.match(this, 8))
         val cm2 = UI.edit(this, GroqClient.DEFAULT_CODER, coderModel())
         form.addView(cm2, UI.match(this, 2))
-        form.addView(UI.text(this, "AI persona (optional) - how the AI talks", 11f, UI.MUTED), UI.match(this, 8))
-        val pe = UI.edit(this, "e.g. short, friendly gamer buddy", prefs.getString("persona", "") ?: "")
-        form.addView(pe, UI.match(this, 2))
-        form.addView(UI.text(this, "OpenRouter key (optional, extra free tokens; use models like or:model-name)", 11f, UI.MUTED), UI.match(this, 8))
-        val ork = UI.edit(this, "sk-or-…", prefs.getString("or_key", "") ?: "")
-        form.addView(ork, UI.match(this, 2))
+        form.addView(UI.text(this, "More AI (optional). Put a model in the lists above with a prefix:  g: Gemini   a: Claude   or: OpenRouter", 11f, UI.MUTED), UI.match(this, 10))
+        val ork = UI.edit(this, "OpenRouter key", prefs.getString("or_key", "") ?: "")
+        form.addView(ork, UI.match(this, 4))
+        val gk = UI.edit(this, "Gemini key (aistudio.google.com)", prefs.getString("g_key", "") ?: "")
+        form.addView(gk, UI.match(this, 4))
+        val ak = UI.edit(this, "Claude key (console.anthropic.com)", prefs.getString("a_key", "") ?: "")
+        form.addView(ak, UI.match(this, 4))
 
         val go = UI.button(this, "🚀 Let's go", UI.ACCENT) {
             val key = k.text.toString().trim()
@@ -608,9 +852,12 @@ class GamingService : Service(), Agent.Hooks {
             if (key.isNotEmpty()) e.putString("groq_key", key)
             e.putString("m_vision", vm.text.toString().trim())
             e.putString("m_coder", cm2.text.toString().trim())
-            e.putString("persona", pe.text.toString().trim())
             e.putString("or_key", ork.text.toString().trim())
+            e.putString("g_key", gk.text.toString().trim())
+            e.putString("a_key", ak.text.toString().trim())
             Keys.openrouter = ork.text.toString().trim()
+            Keys.gemini = gk.text.toString().trim()
+            Keys.anthropic = ak.text.toString().trim()
             e.apply()
             closePanel()
             startInjection()
@@ -642,13 +889,15 @@ class GamingService : Service(), Agent.Hooks {
     }
 
     private fun closeInput() {
+        liveAnim?.cancel()
         input?.let { remOv(it) }
         inputMinimized = false
         input = null
         inputLp = null
         inputEt = null
-        statusTv = null
-        statusScroll = null
+        chatCol = null
+        chatScroll = null
+        liveTv = null
     }
 
     private fun setInputFocusable(f: Boolean) {
@@ -677,9 +926,17 @@ class GamingService : Service(), Agent.Hooks {
         agent.live = false
         val box = card(10)
         val sc = ScrollView(this)
-        val tv = UI.text(this, sub, 12f, UI.MUTED)
-        sc.addView(tv)
-        box.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(110)))
+        sc.isVerticalScrollBarEnabled = false
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        sc.addView(col)
+        box.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)))
+        val lv = UI.text(this, "", 11f, UI.MUTED)
+        box.addView(lv, UI.match(this, 2))
+        chatCol = col
+        chatScroll = sc
+        liveTv = lv
+        bubble(sub, false)
 
         val et = UI.edit(this, "Type any instruction or question…", "", true)
         et.setOnTouchListener { _, e ->
@@ -692,11 +949,13 @@ class GamingService : Service(), Agent.Hooks {
             if (task.isEmpty()) return
             setInputFocusable(false)
             et.setText("")
+            bubble(task, true)
             if (task.lowercase().startsWith("remember ")) {
                 AiMemory.add(this, task.substring(9))
-                status("Saved to AI memory ✔")
+                bubble("Saved to memory ✔", false)
                 return
             }
+            live("Thinking…")
             if (codeMode) {
                 if (coder.running) toast("Already working. Press ■ to stop.") else coder.run(groqKey(), coderModel(), task)
             } else {
@@ -728,27 +987,28 @@ class GamingService : Service(), Agent.Hooks {
         modeBtn.setOnClickListener {
             codeMode = !codeMode
             modeBtn.text = if (codeMode) "📸 OFF" else "📸 ON"
-            modeBtn.background = UI.bg(this, if (codeMode) UI.CARD else UI.ACCENT, 12f)
+            modeBtn.background = if (codeMode) UI.bg(this, UI.CARD, 12f) else UI.grad(this, 0xFF7C4DFF.toInt(), 0xFF4F7CFF.toInt(), 12f)
             if (codeMode) {
-                tv.text = "Screenshot detection OFF - coding AI: reads the screen as text, taps, types, searches the web, runs JavaScript and reads / writes files."
+                bubble("Screenshot detection is OFF. I'm now the coding AI: I read the screen as text, tap, type, search the web, run code, change settings and read or write files.", false)
                 et.hint = "Tell me what to do or build…"
             } else {
-                tv.text = "Screenshot detection ON - the AI looks at screenshots and taps, swipes and types."
+                bubble("Screenshot detection is ON. I look at the screen and tap, swipe and type.", false)
                 et.hint = "Type any instruction or question…"
             }
         }
         val liveBtn = UI.button(this, "👁") {}
         liveBtn.setOnClickListener {
             agent.live = !agent.live
-            liveBtn.background = UI.bg(this, if (agent.live) UI.ACCENT else UI.CARD, 12f)
-            toast(if (agent.live) "Live watch ON: the AI uses two frames and acts faster (about one decision every 2-3 seconds)." else "Live watch OFF")
+            liveBtn.background = if (agent.live) UI.grad(this, 0xFF7C4DFF.toInt(), 0xFF4F7CFF.toInt(), 12f) else UI.bg(this, UI.CARD, 12f)
+            toast(if (agent.live) "Live watch ON: two frames per step and faster actions." else "Live watch OFF")
         }
         cell(modeBtn)
         cell(liveBtn)
         cell(UI.button(this, "■", UI.RED) {
             agent.stop()
             coder.stop()
-            status("Stopped.")
+            live("")
+            bubble("Stopped.", false)
         })
         cell(UI.button(this, "⚙") { showKeyPanel() })
         cell(UI.button(this, "–") { minimizeInput() })
@@ -760,11 +1020,13 @@ class GamingService : Service(), Agent.Hooks {
         p.y = dp(40)
         p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
         addOv(box, p)
+        box.alpha = 0f
+        box.scaleX = 0.95f
+        box.scaleY = 0.95f
+        box.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).start()
         input = box
         inputLp = p
         inputEt = et
-        statusTv = tv
-        statusScroll = sc
     }
 
     // ---------- macros ----------

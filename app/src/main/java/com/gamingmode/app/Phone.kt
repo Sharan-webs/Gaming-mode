@@ -15,6 +15,12 @@ import org.json.JSONObject
 object Keys {
     @Volatile
     var openrouter = ""
+
+    @Volatile
+    var gemini = ""
+
+    @Volatile
+    var anthropic = ""
 }
 
 /** Phone-wide actions shared by the coding AI, the screen AI and button scripts. */
@@ -296,10 +302,6 @@ class ScriptRunner(private val ctx: Context) {
                 PhoneCtl.setSetting(ctx, p.getOrNull(1) ?: "", p.getOrNull(2) ?: "", p.getOrNull(3) ?: "")
             }
             "shell" -> Shell.run(raw.substringAfter(' ', ""))
-            "dpi" -> {
-                val v = t.getOrNull(1) ?: "reset"
-                if (v == "reset" || v.all { it.isDigit() }) Shell.run("wm density $v")
-            }
             "brightness" -> PhoneCtl.brightness(ctx, num(1).toInt())
             "volume" -> PhoneCtl.volume(ctx, num(1).toInt())
         }

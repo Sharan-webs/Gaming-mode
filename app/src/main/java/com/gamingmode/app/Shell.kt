@@ -10,6 +10,7 @@ object Shell {
     // Only the commands that can wipe or brick the whole phone are refused.
     private val blocked = listOf(
         Regex("(^|[;&|] ?)rm (-[a-z]+ )*(/|/\\*|/sdcard/?\\*?|/storage/?\\*?|/storage/emulated(/0)?/?\\*?|/system\\S*|/data/?\\*?|/vendor\\S*|/product\\S*)( |\$|;|&)"),
+        Regex("(^|[;&|] ?)wm (density|size) (?!reset)"),
         Regex("mkfs|(^| )dd .*of=/dev|wipe |factory.?reset|reboot (bootloader|recovery|fastboot)|fastboot|recovery --")
     )
 
@@ -60,6 +61,39 @@ object Shell {
             sb.toString().trim().ifEmpty { "(done, no output)" }
         } catch (e: Throwable) {
             "ERROR: " + (e.cause?.message ?: e.message)
+        }
+    }
+
+    /** Live output: [onText] is called as text arrives. Returns the process so it can be stopped. */
+    fun stream(cmd: String, onText: (String) -> Unit): Process? {
+        if (!ready()) {
+            onText("ERROR: Shizuku is not running or this app is not allowed in Shizuku\n")
+            return null
+        }
+        if (dangerous(cmd)) {
+            onText("BLOCKED: this command could wipe or brick the phone\n")
+            return null
+        }
+        return try {
+            val p = newProcess(arrayOf("sh", "-c", "( $cmd ) 2>&1"))
+            Thread {
+                try {
+                    p.inputStream.bufferedReader().use { r ->
+                        val buf = CharArray(1024)
+                        while (true) {
+                            val n = r.read(buf)
+                            if (n < 0) break
+                            onText(String(buf, 0, n))
+                        }
+                    }
+                } catch (e: Exception) {
+                }
+                onText("\n[finished]\n")
+            }.start()
+            p
+        } catch (e: Throwable) {
+            onText("ERROR: " + (e.cause?.message ?: e.message) + "\n")
+            null
         }
     }
 

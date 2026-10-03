@@ -1,6 +1,9 @@
 package com.gamingmode.app
 
 import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.RippleDrawable
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -29,6 +32,19 @@ object UI {
         return g
     }
 
+    fun grad(c: Context, c1: Int, c2: Int, radiusDp: Float): GradientDrawable {
+        val g = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(c1, c2))
+        g.cornerRadius = radiusDp * c.resources.displayMetrics.density
+        return g
+    }
+
+    fun panel(c: Context): GradientDrawable {
+        val g = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xF2191C2E.toInt(), 0xF20E101B.toInt()))
+        g.cornerRadius = 20f * c.resources.displayMetrics.density
+        g.setStroke(maxOf(1, (c.resources.displayMetrics.density).toInt()), 0x33FFFFFF)
+        return g
+    }
+
     fun oval(color: Int): GradientDrawable {
         val g = GradientDrawable()
         g.shape = GradientDrawable.OVAL
@@ -51,7 +67,8 @@ object UI {
         b.isAllCaps = false
         b.setTextColor(Color.WHITE)
         b.textSize = 14f
-        b.background = bg(c, color, 12f)
+        val base: Drawable = if (color == ACCENT) grad(c, 0xFF7C4DFF.toInt(), 0xFF4F7CFF.toInt(), 12f) else bg(c, color, 12f)
+        b.background = RippleDrawable(ColorStateList.valueOf(0x44FFFFFF), base, null)
         b.minHeight = 0
         b.minimumHeight = 0
         b.stateListAnimator = null

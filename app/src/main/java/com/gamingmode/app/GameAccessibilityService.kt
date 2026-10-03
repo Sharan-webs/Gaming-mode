@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import kotlin.math.hypot
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
@@ -48,7 +49,7 @@ class GameAccessibilityService : AccessibilityService() {
             onEnd?.invoke()
             return
         }
-        if (pts.size <= 2 && getSharedPreferences("gm", MODE_PRIVATE).getBoolean("shell_input", false) && Shell.ready()) {
+        if (pts.size <= 2 && getSharedPreferences("gm", MODE_PRIVATE).getBoolean("shell_input", true) && Shell.ready()) {
             val a = pts[0]
             val b = pts.last()
             val d = durMs.coerceIn(1L, 60000L)
@@ -56,14 +57,31 @@ class GameAccessibilityService : AccessibilityService() {
                 val moved = hypot(b.first - a.first, b.second - a.second) > 20f
                 val cmd = if (!moved && d < 150L) "input tap ${a.first.toInt()} ${a.second.toInt()}"
                 else "input swipe ${a.first.toInt()} ${a.second.toInt()} ${b.first.toInt()} ${b.second.toInt()} $d"
-                Shell.run(cmd, 10000L)
-                Handler(Looper.getMainLooper()).post { onEnd?.invoke() }
+                val r = Shell.run(cmd, 10000L)
+                val failed = r.startsWith("ERROR") || r.startsWith("BLOCKED")
+                Handler(Looper.getMainLooper()).post {
+                    if (failed) gesture(pts, durMs, onEnd) else onEnd?.invoke()
+                }
             }.start()
             return
         }
+        gesture(pts, durMs, onEnd)
+    }
+
+    /** Checks that Android accepted the tap. Returns false if the gesture was refused. */
+    fun tapChecked(x: Float, y: Float): Boolean {
+        val path = Path()
+        path.moveTo(x, y)
+        path.lineTo(x + 1f, y)
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0L, 80L)).build()
+        return dispatchGesture(g, null, null)
+    }
+
+    private fun gesture(pts: List<Pair<Float, Float>>, durMs: Long, onEnd: (() -> Unit)?) {
         val path = Path()
         path.moveTo(maxOf(0f, pts[0].first), maxOf(0f, pts[0].second))
         for (i in 1 until pts.size) path.lineTo(maxOf(0f, pts[i].first), maxOf(0f, pts[i].second))
+        if (pts.size == 1) path.lineTo(maxOf(0f, pts[0].first) + 1f, maxOf(0f, pts[0].second))
         val d = durMs.coerceIn(1L, 60000L)
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, d))
@@ -114,7 +132,15 @@ class GameAccessibilityService : AccessibilityService() {
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
+    private var lastShotAt = 0L
+
     fun screenshot(cb: (Bitmap?) -> Unit) {
+        val wait = 360L - (SystemClock.uptimeMillis() - lastShotAt)
+        if (wait > 0) {
+            Handler(Looper.getMainLooper()).postDelayed({ screenshot(cb) }, wait)
+            return
+        }
+        lastShotAt = SystemClock.uptimeMillis()
         try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,

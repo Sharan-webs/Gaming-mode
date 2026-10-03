@@ -45,7 +45,7 @@ x,y are 0-1000 (0,0 = top-left). Actions:
 {"action":"open","name":"app name"}  {"action":"setting","ns":"system","key":"screen_brightness","value":"200"}
 {"action":"save_macro","name":"jump x5","x":500,"y":800,"repeat":5,"gap_ms":150}  (find the button, save a reusable macro; or give "steps":[{"x":..,"y":..},...])
 {"action":"remember","text":"..."}  {"action":"answer","text":"..."}  {"action":"done","text":"..."}
-Repeating tasks: tap, wait, keep going; never use done until stopped. If the user says always / every time, also use remember once.
+If the task is a single action, do it and then reply done at once. Repeating tasks: tap, wait, keep going; never use done until stopped. If the user says always / every time, also use remember once.
 """.trimIndent()
 
     fun stop() {
@@ -127,6 +127,38 @@ Repeating tasks: tap, wait, keep going; never use done until stopped. If the use
                     listOf(img), 200
                 )
                 ui.post { done(r.trim(), null) }
+            } catch (e: Exception) {
+                ui.post { done(null, e.message ?: "error") }
+            }
+        }.start()
+    }
+
+    /** Describes everything visible on the screen. Result is delivered on the main thread. */
+    fun describe(key: String, modelList: String, done: (String?, String?) -> Unit) {
+        Thread {
+            try {
+                val img = capture()
+                    ?: throw RuntimeException("Could not take a screenshot (is the accessibility permission on?)")
+                val models = modelList.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                var last: Exception? = null
+                for (m in models) {
+                    try {
+                        val r = GroqClient.chat(
+                            key, m,
+                            "You are a precise screen reader for a phone.",
+                            "List everything visible: the app or game, every button, every readable text, characters, objects and items. " +
+                                "Give each one's approximate position as x,y from 0 to 1000 (0,0 top-left). Be concise.",
+                            listOf(img), 900
+                        )
+                        ui.post { done(r.trim(), null) }
+                        return@Thread
+                    } catch (e: InterruptedException) {
+                        throw e
+                    } catch (e: Exception) {
+                        last = e
+                    }
+                }
+                throw last ?: RuntimeException("no model")
             } catch (e: Exception) {
                 ui.post { done(null, e.message ?: "error") }
             }
