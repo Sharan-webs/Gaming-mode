@@ -2,6 +2,7 @@ package com.gamingmode.app
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -15,7 +16,8 @@ import android.widget.TextView
 import android.widget.Toast
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlin.math.hypot
+import android.util.Base64
+
 
 /**
  * AimbotFF — Free Fire MAX pixel-scan aimbot
@@ -185,9 +187,11 @@ object AimbotFF {
         ) {}
         onBtn.setOnClickListener {
             if (GameAccessibilityService.instance == null) {
-                Toast.makeText(ctx, "Accessibility service is not connected.\nEnable it in permissions → turn it OFF and ON once.", Toast.LENGTH_LONG).show()
+                Toast.makeText(ctx, "Accessibility service not connected.\nPermissions → Accessibility → OFF then ON.", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
+            // Reset screencap mode so it auto-detects fresh each session
+            screencapMode = false
             isOn = !isOn
             onBtn.text = if (isOn) "■  AIMBOT OFF" else "▶  AIMBOT ON"
             onBtn.background = UI.bg(ctx, if (isOn) UI.RED else UI.ACCENT, 12f)
@@ -196,19 +200,31 @@ object AimbotFF {
         card.addView(onBtn, UI.match(ctx, 12))
 
         // ── How it works ──────────────────────────────────────────────────────
+        // Shizuku status indicator
+        val shizukuOk = Shell.ready()
+        val shizukuLabel = if (shizukuOk)
+            "✅ Shizuku: connected (screencap bypass active)"
+        else
+            "⚠ Shizuku: OFF — enable it for FF Max screencap bypass"
+        card.addView(
+            UI.text(ctx, shizukuLabel, 12f, if (shizukuOk) UI.GREEN else UI.RED, true),
+            UI.match(ctx, 8)
+        )
+
         card.addView(
             UI.text(
                 ctx,
                 "How it works:\n" +
-                "• Takes screenshot every ${SCAN_INTERVAL_MS}ms\n" +
-                "• Scans for enemy red/orange pixels\n" +
-                "• Locks on the head closest to screen center\n" +
-                "• Injects tap directly into FF Max (accessibility)\n" +
-                "• Snap radius: ${SNAP_RADIUS_PX}px from center\n\n" +
-                "Only needs: Accessibility ON + FF Max open",
+                "• FF Max blocks normal screenshots (FLAG_SECURE)\n" +
+                "• With Shizuku ON: uses shell screencap — bypasses block\n" +
+                "• Scans enemy red/orange pixels every ${SCAN_INTERVAL_MS}ms\n" +
+                "• Head Only: locks top of red cluster (head)\n" +
+                "• Desert Eagle: one precise tap per lock\n" +
+                "• Injects tap into game via accessibility gesture\n\n" +
+                "Needs: Accessibility ON + Shizuku ON + FF Max open",
                 11f, UI.MUTED
             ),
-            UI.match(ctx, 10)
+            UI.match(ctx, 8)
         )
 
         showPanel(card)
@@ -253,11 +269,12 @@ object AimbotFF {
 
             while (isOn && !Thread.currentThread().isInterrupted) {
                 try {
-                    val bmp = grabScreenshot() ?: run {
-                        status("Screenshot failed — is Accessibility ON?")
-                        Thread.sleep(400L)
-                        return@run null
-                    } ?: continue
+                    val bmp = grabScreenshot(ctx)
+                    if (bmp == null) {
+                        status("⚠ Screenshot null — FF Max blocks it\nSwitching to shell screencap (needs Shizuku)…")
+                        Thread.sleep(500L)
+                        continue
+                    }
 
                     val screen = ctx.resources.displayMetrics
                     val sw = screen.widthPixels.toFloat()
@@ -299,20 +316,72 @@ object AimbotFF {
         scanThread = null
     }
 
-    // ── Screenshot via accessibility ──────────────────────────────────────────
+    // ── Screenshot — dual method ───────────────────────────────────────────────
+    //
+    // FF Max sets FLAG_SECURE which blocks the accessibility screenshot API.
+    // Method 1: accessibility takeScreenshot() → fast, fails on FLAG_SECURE
+    // Method 2: shell "screencap" via Shizuku → runs as system uid, bypasses
+    //           FLAG_SECURE entirely, works on any app including FF Max.
+    //
+    // We try Method 1 first (no Shizuku needed). If it returns null we fall
+    // back to Method 2. After the first successful method we stick to it.
 
-    private fun grabScreenshot(): Bitmap? {
-        val svc = GameAccessibilityService.instance ?: return null
-        var result: Bitmap? = null
-        val latch = CountDownLatch(1)
-        mainH.post {
-            svc.screenshot { bmp ->
-                result = bmp
-                latch.countDown()
+    private var screencapMode = false   // true = use shell screencap
+    private val TMP_PATH = "/sdcard/.__gm_sc.png"
+
+    private fun grabScreenshot(ctx: Context): Bitmap? {
+        if (!screencapMode) {
+            // Method 1: accessibility API
+            val svc = GameAccessibilityService.instance
+            if (svc != null) {
+                var result: Bitmap? = null
+                val latch = CountDownLatch(1)
+                mainH.post {
+                    svc.screenshot { bmp ->
+                        result = bmp
+                        latch.countDown()
+                    }
+                }
+                latch.await(3, TimeUnit.SECONDS)
+                if (result != null) return result
             }
+            // Method 1 returned null → FF Max FLAG_SECURE is blocking it
+            // Switch to shell screencap permanently for this session
+            status("Accessibility screenshot blocked by FF Max → switching to shell screencap")
+            screencapMode = true
         }
-        latch.await(3, TimeUnit.SECONDS)
-        return result
+
+        // Method 2: shell screencap via Shizuku
+        // screencap runs as system uid and ignores FLAG_SECURE
+        if (!Shell.ready()) {
+            status("⚠ Shell screencap needs Shizuku — enable it in permissions")
+            return null
+        }
+
+        // Take screenshot to temp file
+        val result = Shell.run("screencap -p $TMP_PATH", 4000L)
+        if (result.startsWith("ERROR") || result.startsWith("BLOCKED")) {
+            status("screencap failed: $result")
+            return null
+        }
+
+        // Read and decode the PNG
+        return try {
+            val bytes = Shell.run(
+                "cat $TMP_PATH | base64 -w 0",
+                5000L
+            ).trim()
+            // clean up temp file quietly
+            Shell.run("rm -f $TMP_PATH", 1000L)
+
+            if (bytes.isEmpty() || bytes.startsWith("ERROR")) return null
+
+            val raw = Base64.decode(bytes, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(raw, 0, raw.size)
+        } catch (e: Exception) {
+            status("Decode error: ${e.message?.take(60)}")
+            null
+        }
     }
 
     // ── Pixel scan ────────────────────────────────────────────────────────────
